@@ -27,12 +27,17 @@ The pruning pipeline consists of the following steps:
 
 6.  **AWQ Quantization (`4. AWQQuantisation.ipynb`):** Converts the model to the AWQ (Activation-aware Weight Quantization) format.  AWQ is a quantization technique that reduces the model's memory footprint and computational cost, making it suitable for inference with tools like vLLM.  This step is essential for running the pruned model on less powerful hardware.
 
-## Target sizes of this method:
-Base Model: 256@8 => DeepSeek-V3-671B@37B-full
-22@6 => DeepSeek-V3-Lite-72B@31B-large
-16@4 => DeepSeek-V3-Lite-57B@26B-medium
-8@2 => DeepSeek-V3-Lite-36B@21B-small
-4@1 => DeepSeek-V3-Lite-26B@19B-nano
+## Target Sizes of This Method:
+
+This method targets the following model sizes, scaling down from a base model:
+
+| Base Model Size      | Scaled Model Size      | Notes      |
+| :------------------- | :--------------------- | :---------- |
+| 256@8 (Base)          | DeepSeek-V3-671B@37B    | Full       |
+| 22@6                 | DeepSeek-V3-Lite-72B@31B | Large      |
+| 16@4                 | DeepSeek-V3-Lite-57B@26B | Medium     |
+| 8@2                  | DeepSeek-V3-Lite-36B@21B | Small      |
+| 4@1                  | DeepSeek-V3-Lite-26B@19B | Nano       |
 
 ## Model Links
 ### Unhealed
