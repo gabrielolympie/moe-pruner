@@ -4,8 +4,10 @@ This repository provides a methodology for pruning DeepSeek-v3, a Mixture-of-Exp
 
 **Warning:** This is a highly experimental technique.  Results are not guaranteed, and significant improvements are planned for future versions.  Use at your own risk.
 
-## Donate
+## CONTRIBUTE
 Due to hardware limitation, i was forced to make a lot of trade off. If you'd like to participate in upcoming versions with a higher compute budget, you can donate here: https://gofund.me/1516dccd
+
+You can also propose improvement on the git repo.
 
 ## Project Goal
 
