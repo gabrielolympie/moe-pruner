@@ -4,6 +4,8 @@ This repository provides a methodology for pruning DeepSeek-v3, a Mixture-of-Exp
 
 **Warning:** This is a highly experimental technique.  Results are not guaranteed, and significant improvements are planned for future versions.  Use at your own risk.
 
+Due to hardware limitation, i was forced to make a lot of trade off. If you'd like to participate in upcoming versions with a higher compute budget, you can donate here: https://gofund.me/1516dccd
+
 ## Project Goal
 
 The primary goal is to drastically reduce the computational and memory requirements of DeepSeek-v3 while retaining a reasonable level of performance.  This is accomplished through a multi-stage distillation and pruning process.
@@ -23,6 +25,26 @@ The pruning pipeline consists of the following steps:
 5.  **Post-training (Healing) (`3. Posttraining.ipynb`):**  Fine-tunes *only* the distilled experts and the gating mechanism.  This "healing" step is crucial to recover performance lost during the aggressive pruning.  The gating mechanism learns to effectively route inputs to the reduced set of experts, and the experts themselves are further refined to improve overall model accuracy.
 
 6.  **AWQ Quantization (`4. AWQQuantisation.ipynb`):** Converts the model to the AWQ (Activation-aware Weight Quantization) format.  AWQ is a quantization technique that reduces the model's memory footprint and computational cost, making it suitable for inference with tools like vLLM.  This step is essential for running the pruned model on less powerful hardware.
+
+## Target sizes of this method:
+Base Model: 256@8 => DeepSeek-V3-671B@37B-full
+22@6 => DeepSeek-V3-Lite-72B@31B-large
+16@4 => DeepSeek-V3-Lite-57B@26B-medium
+8@2 => DeepSeek-V3-Lite-36B@21B-small
+4@1 => DeepSeek-V3-Lite-26B@19B-nano
+
+## Model Links
+### Unhealed
+v0.1 4@1: https://huggingface.co/AlphaGaO/DeepSeek-V3-4a1-unhealed-v0.1
+
+## Iterations:
+v0.1:
+- Distillation : Full expert distillation, 4096 samples with seq_length 515.
+- Post training : Lora tuning (rank / alpha = 16), 65536 samples, seq_length 64 (hardware constraint).
+- Attention layers and shared experts are untouched.
+
+v0.2: (incoming)
+- Distillation : Full gate distillation, lora expert distillation, 16384 samples with seq_length 515.
 
 ## Improvements and Future Work (v0.2+)
 

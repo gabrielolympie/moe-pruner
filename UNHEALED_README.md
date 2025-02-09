@@ -15,6 +15,8 @@ Additionnally this is only the very first iteration of the technique, with a ver
 
 The script and instructions to perform the necessary post-training can be found at: [https://github.com/gabrielolympie/moe-pruner(https://github.com/gabrielolympie/moe-pruner).  This repository provides the tools to "heal" the pruned model and recover its capabilities.  Please follow the instructions in that repository carefully.
 
+Due to hardware limitation, i was forced to make a lot of trade off. If you'd like to participate in upcoming versions with a higher compute budget, you can donate here: https://gofund.me/1516dccd
+
 </div>
 
 <div align="center">
