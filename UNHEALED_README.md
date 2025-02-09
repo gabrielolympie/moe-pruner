@@ -5,19 +5,28 @@ library_name: transformers
 <!-- markdownlint-disable html -->
 <!-- markdownlint-disable no-duplicate-header -->
 
-<div align="center">
-
 ## Important Notice: Unhealed Pruned Versions
-
 **These are unhealed versions of DeepSeek-V3 resulting from pruning, and they will not function correctly out-of-the-box without additional post-training.**  These models are provided for research purposes and require further processing to restore performance.
 
+## DISCLAIMER
 Additionnally this is only the very first iteration of the technique, with a very small sample size for distillation, so don't expect stellar performance yet, but the distillation loss still has quite a marging for improvement ;)
 
-The script and instructions to perform the necessary post-training can be found at: [https://github.com/gabrielolympie/moe-pruner(https://github.com/gabrielolympie/moe-pruner).  This repository provides the tools to "heal" the pruned model and recover its capabilities.  Please follow the instructions in that repository carefully.
+## HEALING NOTICE
+The script and instructions to perform the necessary post-training can be found at: [https://github.com/gabrielolympie/moe-pruner](https://github.com/gabrielolympie/moe-pruner).  This repository provides the tools to "heal" the pruned model and recover its capabilities.  Please follow the instructions in that repository carefully.
 
+## CONTRIBUTE
 Due to hardware limitation, i was forced to make a lot of trade off. If you'd like to participate in upcoming versions with a higher compute budget, you can donate here: https://gofund.me/1516dccd
 
-</div>
+You can also propose improvement on the git repo.
+
+#
+#
+#
+#
+
+
+## Original Model Card
+
 
 <div align="center">
   <img src="https://github.com/deepseek-ai/DeepSeek-V2/blob/main/figures/logo.svg?raw=true" width="60%" alt="DeepSeek-V3" />
