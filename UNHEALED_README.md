@@ -11,6 +11,8 @@ library_name: transformers
 
 **These are unhealed versions of DeepSeek-V3 resulting from pruning, and they will not function correctly out-of-the-box without additional post-training.**  These models are provided for research purposes and require further processing to restore performance.
 
+Additionnally this is only the very first iteration of the technique, with a very small sample size for distillation, so don't expect stellar performance yet, but the distillation loss still has quite a marging for improvement ;)
+
 The script and instructions to perform the necessary post-training can be found at: [https://github.com/gabrielolympie/moe-pruner(https://github.com/gabrielolympie/moe-pruner).  This repository provides the tools to "heal" the pruned model and recover its capabilities.  Please follow the instructions in that repository carefully.
 
 </div>
