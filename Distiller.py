@@ -76,55 +76,51 @@ class LoRALinear(nn.Module):
         self.alpha = alpha
         self.scaling = alpha / rank
 
-        # Get the dtype from the base layer
-        dtype = torch.bfloat16
+        # Get the dtype and device from the base layer
+        dtype = torch.bfloat16  # Or get from base_layer.weight.dtype if it's already a tensor
         device = base_layer.weight.device
 
-        # Initialize LoRA matrices with the same dtype as base layer
+        # Initialize LoRA matrices
         self.weight = nn.Parameter(
             torch.zeros((rank, base_layer.in_features), dtype=dtype, device=device)
         )
         self.lora_B = nn.Parameter(
             torch.zeros((base_layer.out_features, rank), dtype=dtype, device=device)
         )
+
         self.dropout = nn.Dropout(p=dropout)
-        
-        # Initialize weights using kaiming uniform
+
+        # Initialize weights
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B)
-        
+
     def forward(self, x):
-        # Ensure input and weights have the same dtype
+        device = x.device
         if x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
-            
-        # Base forward
-        base_out = self.base_layer(x)
-        
-        # LoRA forward
+
+        base_out = self.base_layer(x).to(device)
         lora_out = self.dropout(x) @ self.weight.t() @ self.lora_B.t() * self.scaling
         
-        return base_out + lora_out
-    
+        return base_out + lora_out.to(device)
+
+
     def merge_and_unload(self):
         """Merge LoRA weights with base weights and return new layer"""
-        if isinstance(self.base_layer, FP8Linear):
-            merged_weight = self.base_layer._weight_unquantized(torch.float32)
-            merged_weight = merged_weight + (self.lora_B @ self.weight) * self.scaling
-            
-            new_layer = FP8Linear(
-                self.base_layer.in_features,
-                self.base_layer.out_features,
-                bias=self.base_layer.bias is not None,
-                device=self.base_layer.device,
-                fp8_format=self.base_layer.fp8_format
-            )
-            new_layer.from_weight_matrix(merged_weight)
-            if self.base_layer.bias is not None:
-                new_layer.bias = nn.Parameter(self.base_layer.bias.clone())
-            return new_layer
-        else:
-            raise NotImplementedError("Merging only supported for FP8Linear base layers")
+        merged_weight = self.base_layer._weight_unquantized(torch.float32).to(self.weight.device)
+        merged_weight = merged_weight + (self.lora_B @ self.weight) * self.scaling
+
+        new_layer = FP8Linear(
+            self.base_layer.in_features,
+            self.base_layer.out_features,
+            bias=self.base_layer.bias is not None,
+            device=self.weight.device,  # Use LoRA's device
+            fp8_format=self.base_layer.fp8_format
+        )
+        new_layer.from_weight_matrix(merged_weight)
+        if self.base_layer.bias is not None:
+            new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.weight.device)) 
+        return new_layer
 
 def prepare_distilled_moe(
     moe,
@@ -159,6 +155,7 @@ def prepare_distilled_moe(
     # Update Experts with custom LoRA
     for i, ind in enumerate(list(selected_experts)[:n_routed_experts]):
         expert = moe.experts[ind]
+        
         pruned_moe.experts[i].to_empty(device=device)
 
         # Apply LoRA to each projection
@@ -230,6 +227,8 @@ class MOEDistillerV3:
         position_ids,
         mlp_params,
         use_fp8=True,
+        lora_rank=8,
+        lora_alpha=16,
         gradient_accumulation_steps=1,
         learning_rate=1e-4,
         weight_decay=0.01,
@@ -267,6 +266,8 @@ class MOEDistillerV3:
                 selected_experts,
                 n_routed_experts,
                 n_active_experts,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
                 learning_rate=learning_rate,
                 weight_decay=weight_decay,
                 total_steps=total_steps,
@@ -369,9 +370,8 @@ class MOEDistillerV3:
             # Reconstruct and merge LoRA for each expert *before* saving
             merged_experts_state_dict = {}
             for i in range(distillat["moe"].config.n_routed_experts):
-              
-                expert = distillat["moe"].experts[i]
                 
+                expert = distillat["moe"].experts[i]
                 #Gate
                 merged_gate = expert.gate_proj.merge_and_unload()
                 merged_gate_proj = merged_gate.to_linear()
@@ -397,9 +397,7 @@ class MOEDistillerV3:
                 del merged_down_proj
                 del expert
                 memory_cleanup()
-
-
+                
             torch.save(merged_experts_state_dict, os.path.join(save_directory, "experts" + save_name))
             torch.save(distillat["moe"].gate.state_dict(), os.path.join(save_directory, "gate" + save_name))
-            destruct_module_optimized(distillat["moe"]) # Destruct after saving
             memory_cleanup()

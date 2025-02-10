@@ -3,3 +3,6 @@ deepseek_v3
 __pycache__
 .ipynb_checkpoints
 .env
+distillation_logs/
+intermediate_states/
+temp.pickle
