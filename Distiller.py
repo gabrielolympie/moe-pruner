@@ -1,4 +1,6 @@
-from deepseek_v3.modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3ForCausalLM
+from modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3ForCausalLM
+import math
+
 from transformers import AutoConfig, AutoModelForCausalLM
 from memory_utils import load_module_weights_and_freeze_optimized, memory_cleanup, destruct_module_optimized  # Assuming you have this file
 from tqdm.auto import tqdm
@@ -14,7 +16,7 @@ import torch.nn as nn
 import warnings
 import os
 from peft import LoraConfig, get_peft_model  # Import LoRA related functions
-from deepseek_v3.custom_modeling.modeling_fp8_deepseek import FP8Linear
+from fp8_linear import FP8Linear
 
 def count_parameters(model):
     frozen_params = 0
@@ -66,13 +68,71 @@ def create_empty_layer(config: AutoConfig, layer_idx=5) -> AutoModelForCausalLM:
         param.requires_grad = False
     return model
 
+class LoRALinear(nn.Module):
+    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05):
+        super().__init__()
+        self.base_layer = base_layer
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+
+        # Get the dtype from the base layer
+        dtype = torch.bfloat16
+        device = base_layer.weight.device
+
+        # Initialize LoRA matrices with the same dtype as base layer
+        self.weight = nn.Parameter(
+            torch.zeros((rank, base_layer.in_features), dtype=dtype, device=device)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros((base_layer.out_features, rank), dtype=dtype, device=device)
+        )
+        self.dropout = nn.Dropout(p=dropout)
+        
+        # Initialize weights using kaiming uniform
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        
+    def forward(self, x):
+        # Ensure input and weights have the same dtype
+        if x.dtype != self.weight.dtype:
+            x = x.to(self.weight.dtype)
+            
+        # Base forward
+        base_out = self.base_layer(x)
+        
+        # LoRA forward
+        lora_out = self.dropout(x) @ self.weight.t() @ self.lora_B.t() * self.scaling
+        
+        return base_out + lora_out
+    
+    def merge_and_unload(self):
+        """Merge LoRA weights with base weights and return new layer"""
+        if isinstance(self.base_layer, FP8Linear):
+            merged_weight = self.base_layer._weight_unquantized(torch.float32)
+            merged_weight = merged_weight + (self.lora_B @ self.weight) * self.scaling
+            
+            new_layer = FP8Linear(
+                self.base_layer.in_features,
+                self.base_layer.out_features,
+                bias=self.base_layer.bias is not None,
+                device=self.base_layer.device,
+                fp8_format=self.base_layer.fp8_format
+            )
+            new_layer.from_weight_matrix(merged_weight)
+            if self.base_layer.bias is not None:
+                new_layer.bias = nn.Parameter(self.base_layer.bias.clone())
+            return new_layer
+        else:
+            raise NotImplementedError("Merging only supported for FP8Linear base layers")
+
 def prepare_distilled_moe(
     moe,
     selected_experts,
     n_routed_experts,
     n_active_experts,
-    lora_rank=8,  # Added LoRA rank
-    lora_alpha=16, # Added LoRA alpha
+    lora_rank=8,
+    lora_alpha=16,
     use_fp8=True,
     learning_rate=1e-4,
     weight_decay=0.01,
@@ -87,47 +147,54 @@ def prepare_distilled_moe(
 
     pruned_moe = DeepseekV3MoE(config)
     pruned_moe.shared_experts.gate_proj = moe.shared_experts.gate_proj
-    pruned_moe.shared_experts.up_proj =  moe.shared_experts.up_proj
-    pruned_moe.shared_experts.down_proj =  moe.shared_experts.down_proj
+    pruned_moe.shared_experts.up_proj = moe.shared_experts.up_proj
+    pruned_moe.shared_experts.down_proj = moe.shared_experts.down_proj
     
     for param in pruned_moe.parameters():
         param.requires_grad = False
 
-    ## Only the gate have a full finetuning
-    pruned_moe.gate.weight = torch.nn.Parameter(moe.gate.weight[list(selected_experts)[:n_routed_experts]].detach().to(device))
+    # Only the gate has full finetuning
+    pruned_moe.gate.weight = nn.Parameter(moe.gate.weight[list(selected_experts)[:n_routed_experts]].detach().to(device))
 
-    # Update Experts - Now with LoRA
+    # Update Experts with custom LoRA
     for i, ind in enumerate(list(selected_experts)[:n_routed_experts]):
-        # Materialization.  Keep FP8 weights!
-        expert = moe.experts[ind]  # Get the original expert, already in FP8
+        expert = moe.experts[ind]
         pruned_moe.experts[i].to_empty(device=device)
 
-        pruned_moe.experts[i].gate_proj = expert.gate_proj
-        pruned_moe.experts[i].up_proj = expert.up_proj
-        pruned_moe.experts[i].down_proj =  expert.down_proj
-
-        # Create LoRA configs for each projection
-        lora_config_gate = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=["weight"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
-        lora_config_up = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=["weight"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
-        lora_config_down = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=["weight"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
-        # print(pruned_moe.experts[i].gate_proj)
-        # Apply LoRA - IMPORTANT: apply to the *FP8Linear* layers!
-        pruned_moe.experts[i].gate_proj = get_peft_model(pruned_moe.experts[i].gate_proj, lora_config_gate)
-        pruned_moe.experts[i].up_proj = get_peft_model(pruned_moe.experts[i].up_proj, lora_config_up)
-        pruned_moe.experts[i].down_proj = get_peft_model(pruned_moe.experts[i].down_proj, lora_config_down)
+        # Apply LoRA to each projection
+        pruned_moe.experts[i].gate_proj = LoRALinear(
+            expert.gate_proj, 
+            rank=lora_rank, 
+            alpha=lora_alpha
+        )
+        pruned_moe.experts[i].up_proj = LoRALinear(
+            expert.up_proj, 
+            rank=lora_rank, 
+            alpha=lora_alpha
+        )
+        pruned_moe.experts[i].down_proj = LoRALinear(
+            expert.down_proj, 
+            rank=lora_rank, 
+            alpha=lora_alpha
+        )
 
     pruned_moe.to(device)
 
-    for name,param in pruned_moe.named_parameters():
-        if "lora" in name.lower():
-            param.requires_grad=True
+    # Set requires_grad for LoRA parameters only
+    for name, param in pruned_moe.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
         else:
             param.requires_grad = False
 
     for param in pruned_moe.gate.parameters():
         param.requires_grad = True
         
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, pruned_moe.parameters()), lr=learning_rate, weight_decay=weight_decay)  # Correct optimizer
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, pruned_moe.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay
+    )
 
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
@@ -138,7 +205,7 @@ def prepare_distilled_moe(
     criterion = torch.nn.MSELoss().to(device)
 
     return {
-        "suffix": f"{n_routed_experts}@{n_active_experts}",
+        "suffix": f"{n_routed_experts}a{n_active_experts}",
         "moe": pruned_moe,
         "optimizer": optimizer,
         "scheduler": scheduler,
@@ -150,14 +217,12 @@ class MOEDistillerV3:
         self,
         layer,
         layer_idx,
-        gradient_accumulation_steps=1,
         model_name="deepseek",
     ):
         self.layer = layer
         self.layer_idx = layer_idx
-        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.model_name=model_name
-        self.step_count = 0  # Counter for gradient accumulation
+        
 
     def calibrate(
         self,
@@ -165,12 +230,16 @@ class MOEDistillerV3:
         position_ids,
         mlp_params,
         use_fp8=True,
+        gradient_accumulation_steps=1,
         learning_rate=1e-4,
         weight_decay=0.01,
         alpha=0.5,
         total_steps=100,
         temperature=10,
     ):
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.step_count = 0  # Counter for gradient accumulation
+        
         self.layer.mlp.gate.save_path = 'temp.pickle' #This should be a class attribute
         self.temperature=temperature
         for param in self.layer.parameters():

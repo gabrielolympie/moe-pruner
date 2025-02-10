@@ -51,11 +51,12 @@ class FP8Linear(torch.nn.Module):
 
 
     def from_weight_matrix(self, weights):
-        self.weight = bnb.nn.Params4bit(weights.to(self.device), requires_grad=False, quant_type='fp4').to(self.device)
+        self.weight = bnb.nn.Int8Params(weights.to(self.device), requires_grad=False)
+        self.weight.cuda(self.device)
 
 
     def _weight_unquantized(self, dtype=torch.bfloat16):
-        return bnb.functional.dequantize_4bit(self.weight.data, self.weight.quant_state).to(dtype)
+        return bnb.functional.int8_vectorwise_dequant(self.weight.data, self.weight.SCB).to(dtype)
 
     def forward(self, x):
         x = x.to(torch.float32)
