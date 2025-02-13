@@ -113,9 +113,9 @@ def process_module(
         return None
 
     if module_path is not None:
-        full_name = f"{module_path}.{name}.weight"
+        full_name = f"{module_path}.{name}"
     else:
-        full_name = f"{name}.weight"
+        full_name = f"{name}"
         
     for exception in ignore:
         if exception in full_name:
@@ -124,10 +124,11 @@ def process_module(
     dtype = torch.bfloat16
 
     if type(module).__name__ == "Linear":
-        weight_file = weight_map[full_name]
-        weight = load_weight_cached(full_name, weight_file, model_name, device)
+        weight_name = f"{full_name}.weight"
+        weight_file = weight_map[weight_name]
+        weight = load_weight_cached(weight_name, weight_file, model_name, device)
 
-        quant_state_name = f"{full_name}_scale_inv"
+        quant_state_name = f"{full_name}.weight_scale_inv"
         if quant_state_name in weight_map:  # Check if quant_state exists
             quant_state_file = weight_map[quant_state_name]
             quant_state = load_weight_cached(quant_state_name, quant_state_file, model_name, device)
@@ -161,8 +162,9 @@ def process_module(
         for weight_name, weights in module.named_parameters():
             try:
                 weights.requires_grad = False
-                weight_file = weight_map[full_name]  # Corrected: Use full_name
-                tensor = load_weight_cached(full_name, weight_file, model_name, device) # Corrected: full_name
+                full_weight_name=f"{full_name}.{weight_name}"
+                weight_file = weight_map[full_weight_name]  # Corrected: Use full_name
+                tensor = load_weight_cached(full_weight_name, weight_file, model_name, device) # Corrected: full_name
                 weights.copy_(tensor).to(dtype=torch.bfloat16, device=device)
             except Exception as e:
                 logger.error(f"Failed to load weights for {full_name}: {e}")
