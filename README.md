@@ -58,6 +58,8 @@ v0.2: (incoming)
 
 The initial experiments have revealed several areas for improvement:
 
+*   **Distillation instability when reducing number of active experts:** While running the first pipeline, it seems that reducing the number of active experts insert some training instabilities in the system. It is not clear yet why (there was a bug where the gate bias was not loaded properly) so second run will keep a high number of active experts to correct this.
+
 *   **Reconstruction Loss Gradient:**  A key observation is that the reconstruction loss (the difference between the original and pruned layer outputs) increases significantly with layer depth.  Later layers (e.g., layer 40) have much higher loss than earlier layers (e.g., layer 10).  This suggests that MoEs are particularly important for deeper layers, and a more effective pruning strategy might vary the number of experts based on layer depth.
 
 *   **Calibration Dataset Size:** The current pipeline uses a relatively small calibration dataset (4096 samples) due to resource constraints.  Increasing the size of this dataset is expected to improve distillation quality.
