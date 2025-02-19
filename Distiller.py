@@ -106,7 +106,7 @@ def create_empty_layer_fp8(config, layer_idx):
 
 class AdapterBase(nn.Module):
     """Base class for LoRA and DoRA adapters"""
-    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05):
+    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, device="cuda:0"):
         super().__init__()
         self.base_layer = base_layer
         self.rank = rank
@@ -116,7 +116,7 @@ class AdapterBase(nn.Module):
         
         # Get the dtype and device from the base layer
         self.dtype = torch.bfloat16
-        self.device = base_layer.weight.device
+        self.device = device
         
     def reset_parameters(self):
         raise NotImplementedError
@@ -128,8 +128,12 @@ class AdapterBase(nn.Module):
         raise NotImplementedError
 
 class LoRALinear(AdapterBase):
-    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05):
-        super().__init__(base_layer, rank, alpha, dropout)
+    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, device="cuda:0"):
+        super().__init__(base_layer, rank, alpha, dropout, device)
+        self.weight = base_layer.weight
+
+        # self.device=base_layer.device
+        self.dtype=torch.bfloat16
         
         # Initialize LoRA matrices with proper scaling
         self.lora_A = nn.Parameter(
@@ -147,9 +151,8 @@ class LoRALinear(AdapterBase):
         nn.init.zeros_(self.lora_B)
         
     def forward(self, x):
-        # Ensure dtype consistency
-        if x.dtype != self.dtype:
-            x = x.to(self.dtype)
+        # Move input to the correct device and dtype
+        x = x.to(device=self.device, dtype=self.dtype)
             
         # Base layer output
         base_out = self.base_layer(x)
@@ -158,7 +161,7 @@ class LoRALinear(AdapterBase):
         dropout_x = self.dropout(x)
         lora_out = (dropout_x @ self.lora_A.t() @ self.lora_B.t()) * self.scaling
         
-        return base_out + lora_out.to(base_out.device)
+        return base_out + lora_out
     
     def merge_and_unload(self):
         """Merge LoRA weights with base weights and return new layer"""
@@ -179,20 +182,22 @@ class LoRALinear(AdapterBase):
             new_layer.weight = nn.Parameter(merged_weight)
             
         if self.base_layer.bias is not None:
-            new_layer.bias = nn.Parameter(self.base_layer.bias.clone())
+            new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.device))
             
         return new_layer
 
 class DoRALinear(AdapterBase):
-    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, dora_simple=True):
-        super().__init__(base_layer, rank, alpha, dropout)
-        
+    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, dora_simple=True, device="cuda:0"):
+        super().__init__(base_layer, rank, alpha, dropout, device)
+
+        self.weight = base_layer.weight
         self.dora_simple = dora_simple
         
         # Initialize LoRA matrices
         self.lora_A = nn.Parameter(
             torch.empty((rank, base_layer.in_features), dtype=self.dtype, device=self.device)
         )
+        
         self.lora_B = nn.Parameter(
             torch.empty((base_layer.out_features, rank), dtype=self.dtype, device=self.device)
         )
@@ -201,7 +206,7 @@ class DoRALinear(AdapterBase):
         self.weight_m = nn.Parameter(
             torch.empty((base_layer.out_features, 1), dtype=self.dtype, device=self.device)
         )
-        
+
         self.reset_parameters()
         
     def reset_parameters(self):
@@ -210,16 +215,20 @@ class DoRALinear(AdapterBase):
         
         # Initialize magnitude component from base weights
         with torch.no_grad():
-            base_norm = torch.linalg.norm(self.base_layer._weight_unquantized, dim=1, keepdim=True)
+            base_norm = torch.linalg.norm(
+                self.base_layer._weight_unquantized(self.dtype).to(self.device), 
+                dim=1, 
+                keepdim=True
+            )
             self.weight_m.data.copy_(base_norm)
     
     def forward(self, x):
-        if x.dtype != self.dtype:
-            x = x.to(self.dtype)
+        # Move input to the correct device and dtype
+        x = x.to(device=self.device, dtype=self.dtype)
         
-        # Get base weight and its norm
-        base_weight = self.base_layer._weight_unquantized
-        
+        # Get base weight and ensure it's on the correct device
+        base_weight = self.base_layer._weight_unquantized(self.dtype).to(self.device)
+
         # Calculate new weight with LoRA
         new_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
         
@@ -241,18 +250,22 @@ class DoRALinear(AdapterBase):
         result = (base_out + lora_out) * norm_scale.t()
         
         if self.base_layer.bias is not None:
-            result += self.base_layer.bias
+            result += self.base_layer.bias.to(self.device)
             
         return result
     
     def merge_and_unload(self):
         """Merge DoRA weights with base weights and return new layer"""
-        new_weight = self.base_layer._weight_unquantized(torch.float32).to(self.device)
+        new_weight = self.base_layer._weight_unquantized(self.dtype).to(self.device)
+        
         new_weight = new_weight + (self.lora_B @ self.lora_A) * self.scaling
         
         # Apply magnitude scaling
         base_norm = torch.linalg.norm(new_weight, dim=1, keepdim=True)
-        norm_scale = (self.weight_m / base_norm).t()
+        
+        norm_scale = self.weight_m / base_norm
+
+        # print(new_weight.shape, norm_scale.shape)
         merged_weight = new_weight * norm_scale
         
         new_layer = type(self.base_layer)(
@@ -269,7 +282,7 @@ class DoRALinear(AdapterBase):
             new_layer.weight = nn.Parameter(merged_weight)
             
         if self.base_layer.bias is not None:
-            new_layer.bias = nn.Parameter(self.base_layer.bias.clone())
+            new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.device))
             
         return new_layer
 
@@ -286,6 +299,7 @@ class DistillationConfig:
     total_steps: int = 100
     temperature: float = 1.0
     gradient_accumulation_steps: int = 1
+    device: str = "cuda:1"
 
 def prepare_distilled_moe(
     moe,
@@ -326,7 +340,8 @@ def prepare_distilled_moe(
         adapter_kwargs = {
             "rank": config.adapter_rank,
             "alpha": config.adapter_alpha,
-            "dropout": config.adapter_dropout
+            "dropout": config.adapter_dropout,
+            "device": config.device,
         }
         
         if config.adapter_type.lower() == "dora":
@@ -414,12 +429,13 @@ class MOEDistillerV3:
         # Collect expert selection statistics
         top_k_output = []
         for batch in tqdm(calibration_batch):
-            x = self.layer.forward(
-                batch.to('cuda:0', dtype=torch.bfloat16),
-                position_ids=position_ids
-            )[0].to('cpu')
-            with open(temp_path, 'rb') as f:
-                top_k_output.append(pickle.load(f))
+            with torch.no_grad():
+                x = self.layer.forward(
+                    batch.to('cuda:0', dtype=torch.bfloat16),
+                    position_ids=position_ids
+                )[0].to('cpu')
+                with open(temp_path, 'rb') as f:
+                    top_k_output.append(pickle.load(f))
         top_k_output = np.concatenate(top_k_output)
 
         # Calculate expert usage frequencies
