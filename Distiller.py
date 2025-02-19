@@ -378,7 +378,7 @@ def prepare_distilled_moe(
     )
     
     criterion = torch.nn.MSELoss().to(device)
-    
+    count_parameters(pruned_moe)
     return {
         "suffix": f"{config.adapter_type}_{n_routed_experts}a{n_active_experts}",
         "moe": pruned_moe,
