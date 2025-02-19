@@ -210,7 +210,7 @@ class DoRALinear(AdapterBase):
         
         # Initialize magnitude component from base weights
         with torch.no_grad():
-            base_norm = torch.linalg.norm(self.base_layer.weight, dim=1, keepdim=True)
+            base_norm = torch.linalg.norm(self.base_layer._weight_unquantized, dim=1, keepdim=True)
             self.weight_m.data.copy_(base_norm)
     
     def forward(self, x):
@@ -218,7 +218,7 @@ class DoRALinear(AdapterBase):
             x = x.to(self.dtype)
         
         # Get base weight and its norm
-        base_weight = self.base_layer.weight
+        base_weight = self.base_layer._weight_unquantized
         
         # Calculate new weight with LoRA
         new_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling

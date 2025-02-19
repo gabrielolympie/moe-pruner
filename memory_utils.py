@@ -12,7 +12,7 @@ import os
 
 from fp8_linear import FP8Linear
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import logging
 import torch.nn.functional as F
 

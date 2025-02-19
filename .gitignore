@@ -6,3 +6,5 @@ __pycache__
 distillation_logs/
 intermediate_states/
 temp.pickle
+layers
+temp*
