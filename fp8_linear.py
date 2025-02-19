@@ -13,17 +13,25 @@ class FP8Linear(torch.nn.Module):
         out_features,
         bias=False,
         device="cuda:0",
-        fp8_format="e4m3"
+        fp8_format="e4m3",
+        init_empty=False
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        
+        # Create weight as meta tensor
         self.weight = None
         # Ensure bias is on the specified device
         self.bias = torch.nn.Parameter(torch.zeros(out_features, device=device, dtype=torch.float32)) if bias else None
         self.device = device  # Store the device
         self.fp8_format = fp8_format.lower()
         self.max_value = self._get_max_value()
+
+        if init_empty:
+            self.from_weight_matrix(torch.nn.Parameter(
+                torch.zeros(out_features, in_features, device="cuda:0", dtype=torch.bfloat16)
+            ))
 
     def _get_max_value(self):
         if self.fp8_format == "e4m3":
@@ -77,3 +85,20 @@ class FP8Linear(torch.nn.Module):
         out = torch.clamp(out, min=-self.max_value, max=self.max_value)
         out = torch.nan_to_num(out, nan=self.max_value, posinf=self.max_value, neginf=-self.max_value)
         return out.to(torch.bfloat16)
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to include SCB."""
+        state_dict = super().state_dict(destination, prefix, keep_vars)
+        if self.weight is not None:
+            state_dict[prefix + 'weight_SCB'] = self.weight.SCB
+        return state_dict
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Override load_state_dict to load SCB."""
+        weight_SCB = state_dict.pop('weight_SCB', None)
+        super().load_state_dict(state_dict, strict)  # Load other parameters
+        if weight_SCB is not None and self.weight is not None:
+            if isinstance(weight_SCB, torch.Tensor):
+                self.weight.SCB = weight_SCB.to(self.weight.SCB.device)  # Restore SCB
+            else:
+                self.weight.SCB = torch.nn.Parameter(weight_SCB.to(self.weight.SCB.device), requires_grad=False)

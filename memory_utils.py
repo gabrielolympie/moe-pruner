@@ -116,6 +116,9 @@ def process_module(
         full_name = f"{module_path}.{name}"
     else:
         full_name = f"{name}"
+
+    if full_name[-1]==".":
+        full_name=full_name[:-1]
         
     for exception in ignore:
         if exception in full_name:
@@ -127,7 +130,6 @@ def process_module(
         weight_name = f"{full_name}.weight"
         weight_file = weight_map[weight_name]
         weight = load_weight_cached(weight_name, weight_file, model_name, device)
-
         quant_state_name = f"{full_name}.weight_scale_inv"
         if quant_state_name in weight_map:  # Check if quant_state exists
             quant_state_file = weight_map[quant_state_name]
@@ -148,11 +150,11 @@ def process_module(
 
         else:  # If quant_state is not found, create a regular Linear layer
             # Create a new Linear layer and load the weights
-            new_linear = torch.nn.Linear(module.in_features, module.out_features, bias=module.bias is not None, device=device)
-            new_linear.weight = torch.nn.Parameter(weight.to(dtype))  # Assign the loaded weight
-            if module.bias is not None:
-                new_linear.bias = torch.nn.Parameter(module.bias.data.to(dtype)) # bias should to float32.
-            module = new_linear
+            module.to_empty(device="cuda:0")
+            with torch.no_grad():  # Disable gradient tracking during weight loading
+                module.weight.copy_(weight.to(dtype))
+                if module.bias is not None:
+                    module.bias.copy_(module.bias.data.to(torch.float32))
             
         memory_cleanup()
 
