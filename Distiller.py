@@ -295,6 +295,7 @@ class DistillationConfig:
     adapter_dropout: float = 0.05
     dora_simple: bool = True
     learning_rate: float = 1e-4
+    end_factor: float = 0.1
     weight_decay: float = 0.01
     total_steps: int = 100
     temperature: float = 1.0
@@ -373,7 +374,7 @@ def prepare_distilled_moe(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.01,
+        end_factor=config.end_factor,
         total_iters=config.total_steps
     )
     
@@ -410,12 +411,24 @@ class MOEDistillerV3:
         calibration_batch,
         position_ids,
         mlp_params,
-        config: DistillationConfig
+        params
     ):
         # Store the config for use in other methods
-        self.config = config
-        self.temperature = config.temperature
-        self.gradient_accumulation_steps = config.gradient_accumulation_steps
+        self.config = DistillationConfig(
+            adapter_type=params.lora_type,
+            adapter_rank=params.lora_rank,
+            adapter_alpha=params.lora_alpha,
+            learning_rate=params.learning_rate,
+            end_factor=params.end_factor,
+            temperature=params.temperature,
+            total_steps=params.n_batch,
+            gradient_accumulation_steps=params.gradient_accumulation_steps,
+            device=params.distiller_device
+        )
+
+        
+        self.temperature = self.config.temperature
+        self.gradient_accumulation_steps = self.config.gradient_accumulation_steps
         self.step_count = 0
         
         # Create temporary file path for gate outputs
@@ -423,8 +436,8 @@ class MOEDistillerV3:
         self.layer.mlp.gate.save_path = temp_path
         
         # Disable gradients for base layer
-        for param in self.layer.parameters():
-            param.requires_grad = False
+        for parameter in self.layer.parameters():
+            parameter.requires_grad = False
 
         # Collect expert selection statistics
         top_k_output = []
