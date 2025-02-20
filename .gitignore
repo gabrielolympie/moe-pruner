@@ -8,3 +8,5 @@ intermediate_states/
 temp.pickle
 layers
 temp*
+exp_states/
+expert_activation/

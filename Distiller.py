@@ -373,7 +373,7 @@ def prepare_distilled_moe(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.1,
+        end_factor=0.01,
         total_iters=config.total_steps
     )
     
@@ -438,6 +438,9 @@ class MOEDistillerV3:
                     top_k_output.append(pickle.load(f))
         top_k_output = np.concatenate(top_k_output)
 
+        with open(f'expert_activation/layer_{self.layer_idx}.pickle','wb') as f:
+            pickle.dump(top_k_output, f)
+        
         # Calculate expert usage frequencies
         v, c = np.unique(top_k_output, return_counts=True)
         selected_experts = np.flip(np.argsort(c))
@@ -469,7 +472,7 @@ class MOEDistillerV3:
             
         hidden_states = hidden_states.to("cuda:0", dtype=torch.bfloat16)
 
-        hidden_states, distillat_hidden_states = self.step_forward(
+        hidden_states, distillat_hidden_states, exp_states = self.step_forward(
             hidden_states, 
             attention_mask, 
             position_ids
@@ -477,10 +480,14 @@ class MOEDistillerV3:
         losses = {}
 
         # Calculate and accumulate losses
+        hidden_states_mean = torch.mean(hidden_states, dim=-1, keepdim=True)
+        hidden_states_std = torch.std(hidden_states, dim=-1, keepdim=True)
+
         for i, distillat in enumerate(self.distillats):
+            
             loss = distillat["criterion"](
-                hidden_states * self.temperature, 
-                distillat_hidden_states[i] * self.temperature
+                (hidden_states -  hidden_states_mean) / hidden_states_std,
+                (distillat_hidden_states[i] -  hidden_states_mean) / hidden_states_std
             )
             # Scale loss for gradient accumulation
             loss = loss / self.gradient_accumulation_steps
@@ -502,7 +509,7 @@ class MOEDistillerV3:
         del distillat_hidden_states
         memory_cleanup()
         
-        return hidden_states, losses
+        return hidden_states, losses, exp_states
 
     def step_forward(
         self,
@@ -555,7 +562,7 @@ class MOEDistillerV3:
             distillat_hidden_state = distillat['moe'](hidden_states)
             distillat_hidden_states.append(distillat_hidden_state + residual)
 
-        return hidden_states_frozen, distillat_hidden_states
+        return hidden_states_frozen, distillat_hidden_states, hidden_states.detach().cpu()
 
     def save_distillats(self):
         for distillat in self.distillats:
