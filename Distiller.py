@@ -373,7 +373,7 @@ def prepare_distilled_moe(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.01,
+        end_factor=0.1,
         total_iters=config.total_steps
     )
     
@@ -498,7 +498,7 @@ class MOEDistillerV3:
                 distillat["optimizer"].zero_grad()
 
         # Move tensors to CPU and free memory
-        hidden_states = hidden_states.to("cpu", dtype=torch.bfloat16)
+        hidden_states = hidden_states.detach().to("cpu", dtype=torch.bfloat16)
         del distillat_hidden_states
         memory_cleanup()
         
