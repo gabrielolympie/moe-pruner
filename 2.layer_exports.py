@@ -1,8 +1,8 @@
 import gc
 import _pickle as pickle
 
-from memory_utils import load_module_weights_and_freeze_optimized, load_weight_cached, destruct_module_optimized
-from Distiller import load_model_config, create_empty_model, create_empty_layer, create_empty_layer_fp8
+from memory_utils import load_module_weights_and_freeze_optimized, load_weight_cached, load_model_config, create_empty_model, create_empty_layer
+from torch_utils import destruct_module_optimized, create_empty_layer_fp8, memory_cleanup
 
 from tqdm.auto import tqdm
 import torch
@@ -64,7 +64,7 @@ if __name__ == "__main__":  # Corrected the main guard
 
 
     destruct_module_optimized(model)
-     memory_cleanup()
+    memory_cleanup()
     ## Layers
     for i in tqdm(range(62)):
 

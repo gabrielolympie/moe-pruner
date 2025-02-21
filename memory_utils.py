@@ -2,6 +2,7 @@ from safetensors import safe_open
 import bitsandbytes as bnb
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
+from modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3ForCausalLM
 from accelerate import init_empty_weights
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -20,24 +21,69 @@ import torch.nn.functional as F
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
-def count_parameters(model):
-    frozen_params = 0
-    non_frozen_params = 0
+def load_model_config(model_name: str) -> Tuple[dict, AutoConfig]:
+    """Load model configuration and weight map efficiently."""
+    with open(f"{model_name}/model.safetensors.index.json", 'r') as f:
+        weight_map = json.load(f)['weight_map']
 
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            non_frozen_params += param.numel()
-        else:
-            frozen_params += param.numel()
+    config = AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+    )
+    return weight_map, config
 
-    total_params = frozen_params + non_frozen_params
+def create_empty_model(config: AutoConfig):
+    with init_empty_weights():
+        model = DeepseekV3ForCausalLM(
+            config,
+        )
+    return model
 
-    print(f"{'Parameter Type':<20} {'Count':<10}")
-    print(f"{'='*20} {'='*10}")
-    print(f"{'Frozen Parameters':<20} {frozen_params:<10,}")
-    print(f"{'Non-Frozen Parameters':<20} {non_frozen_params:<10,}")
-    print(f"{'Total Parameters':<20} {total_params:<10,}")
+def create_empty_layer(config: AutoConfig, layer_idx=5) -> AutoModelForCausalLM:
+    """Create an empty model with frozen parameters."""
+    with init_empty_weights():
+        model = DeepseekV3DecoderLayer(
+            config,
+            layer_idx=layer_idx
+        )
 
+    for param in model.parameters():
+        param.requires_grad = False
+    return model
+
+def create_empty_layer_fp8(config, layer_idx, device="cuda:0"):
+    layer = create_empty_layer(config, layer_idx)
+    # Helper function to recursively replace modules
+    def replace_linear_modules(module, path=''):
+        for name, child in module.named_children():
+            child_path = f"{path}.{name}" if path else name
+            
+            # If this is a Linear module, replace it
+            if isinstance(child, torch.nn.Linear):
+                new_module = FP8Linear(
+                    child.in_features,
+                    child.out_features,
+                    bias=child.bias is not None,
+                    device=device,
+                    fp8_format="e4m3",
+                    init_empty=True
+                )
+                # Use proper nested setattr
+                parent = module
+                if '.' in name:
+                    *parent_path, name = name.split('.')
+                    for part in parent_path:
+                        parent = getattr(parent, part)
+                setattr(parent, name, new_module)
+            else:
+                # Recursively process nested modules
+                replace_linear_modules(child, child_path)
+    # Start the recursive replacement
+    replace_linear_modules(layer)
+    return layer
+  
 def load_weight_cached(
     weight_name: str,
     weight_file: str,
@@ -56,13 +102,6 @@ def load_weight_cached(
             else:
                 return tensor_slice[:]
 
-def memory_cleanup():
-    """Perform thorough memory cleanup"""
-    gc.collect()
-    torch.cuda.empty_cache()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
 def rebuild_from_8bit(layer: FP8Linear, trainable: bool = True, device="cuda", dtype: torch.dtype = torch.bfloat16) -> torch.nn.Linear:
     """Rebuilds a standard torch.nn.Linear layer from an FP8Linear layer."""
     new_layer = layer.to_linear(dtype=dtype)
@@ -72,30 +111,6 @@ def rebuild_from_8bit(layer: FP8Linear, trainable: bool = True, device="cuda", d
     return new_layer
 
 
-def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
-    """
-    Dequantizes a weight matrix using per-group scaling factors.
-    """
-    assert x.is_contiguous() and s.is_contiguous()
-    assert x.dim() == 2 and s.dim() == 2
-    M, N = x.shape
-    y = torch.empty_like(x, dtype=torch.float32)
-
-    num_blocks_m = (M + block_size - 1) // block_size
-    num_blocks_n = (N + block_size - 1) // block_size
-
-    for pid_m in range(num_blocks_m):
-        for pid_n in range(num_blocks_n):
-            start_m = pid_m * block_size
-            end_m = min((pid_m + 1) * block_size, M)
-            start_n = pid_n * block_size
-            end_n = min((pid_n + 1) * block_size, N)
-
-            x_block = x[start_m:end_m, start_n:end_n]
-            s_val = s[pid_m, pid_n]
-            y[start_m:end_m, start_n:end_n] = x_block.to(torch.float32) * s_val
-
-    return y
 
 def process_module(
     module_info: Tuple[str, torch.nn.Module],
@@ -134,6 +149,7 @@ def process_module(
         if quant_state_name in weight_map:  # Check if quant_state exists
             quant_state_file = weight_map[quant_state_name]
             quant_state = load_weight_cached(quant_state_name, quant_state_file, model_name, device)
+            
             weight = weight_dequant(weight, quant_state).to(dtype)
 
             module = FP8Linear(
@@ -238,8 +254,3 @@ def load_module_weights_and_freeze_optimized(
     memory_cleanup()
     return base_module
 
-def destruct_module_optimized(module: torch.nn.Module) -> torch.nn.Module:
-    """Efficiently destroy module and clear memory."""
-    module.to_empty(device="meta")
-    gc.collect()
-    torch.cuda.empty_cache()

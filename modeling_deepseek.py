@@ -64,6 +64,9 @@ if is_flash_attn_2_available():
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
 
+from fp8_linear import FP8Linear
+
+
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
 if is_torch_fx_available():
@@ -400,15 +403,14 @@ class DeepseekV3MLP(nn.Module):
             config.intermediate_size if intermediate_size is None else intermediate_size
         )
 
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj = FP8Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = FP8Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = FP8Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
-
 
 class MoEGate(nn.Module):
     def __init__(self, config):
@@ -445,9 +447,11 @@ class MoEGate(nn.Module):
         bsz, seq_len, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.view(-1, h)
+        
         logits = F.linear(
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
         )
+        
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:
@@ -455,42 +459,10 @@ class MoEGate(nn.Module):
                 f"insupportable scoring function for MoE gating: {self.scoring_func}"
             )
 
-        ### select top-k experts
-        if self.training:
-            topk_weight, topk_idx = torch.topk(
-                scores, k=self.top_k, dim=-1, sorted=False
-            )
-        else:
-            if self.topk_method == "noaux_tc":
-                assert not self.training
-                scores_for_choice = scores.view(bsz * seq_len, -1) + self.e_score_correction_bias.unsqueeze(0)
-                group_scores = (
-                    scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim = -1)
-                )  # [n, n_group]
-                group_idx = torch.topk(
-                    group_scores, k=self.topk_group, dim=-1, sorted=False
-                )[
-                    1
-                ]  # [n, top_k_group]
-                group_mask = torch.zeros_like(group_scores)  # [n, n_group]
-                group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-                score_mask = (
-                    group_mask.unsqueeze(-1)
-                    .expand(
-                        bsz * seq_len, self.n_group, self.n_routed_experts // self.n_group
-                    )
-                    .reshape(bsz * seq_len, -1)
-                )  # [n, e]
-                tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-                _, topk_idx = torch.topk(
-                    tmp_scores, k=self.top_k, dim=-1, sorted=False
-                )
-                topk_weight = scores.gather(1, topk_idx)
-            else:
-                raise NotImplementedError(
-                    f"insupportable TopK function for MoE gating: {self.topk_method}"
-                )
-    
+        topk_weight, topk_idx = torch.topk(
+            scores, k=self.top_k, dim=-1, sorted=False
+        )
+        
         ### norm gate to sum 1
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
@@ -586,109 +558,36 @@ class DeepseekV3MoE(nn.Module):
         orig_shape = hidden_states.shape
         
         hidden_states.to(self.gate.weight.device)
+        
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
+        
         hidden_states.to(base_device)
         
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
         
-        if not self.training:
-            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
-        else:
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0
-            )
-            y = torch.empty_like(hidden_states)
-            for i, expert in enumerate(self.experts):
-                expert_device = expert.gate_proj.weight.device
-                y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i].to(expert_device)).to(base_device)
-                
-            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
-            y = y.to(hidden_states.dtype).view(*orig_shape)
-            y = AddAuxiliaryLoss.apply(y, aux_loss)
+        print('raw')
         
-        if self.config.n_shared_experts is not None:
-            identity_device = hidden_states.device
-            expert_device = self.shared_experts.gate_proj.weight.device
-            y = y + self.shared_experts(identity.to(expert_device)).to(base_device)
-        return y
-
-    @torch.no_grad()
-    def moe_infer(self, x, topk_ids, topk_weight):
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-        cnts.scatter_(1, topk_ids, 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        idxs = topk_ids.view(-1).argsort()
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        sorted_tokens_shape = sorted_tokens.shape
-        if self.ep_size > 1:
-            tokens_per_ep_rank = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1)
-                .sum(1)
-                .cpu()
-                .numpy()
-                .tolist()
-            )
-            gathered_tokens = sorted_tokens.new_empty(
-                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
-            )
-            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
-            dist.all_to_all(
-                list(gathered_tokens.split(output_splits)),
-                list(sorted_tokens.split(input_split_sizes)),
-            )
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank
-            ).sum(dim=0)
-            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
-            s = 0
-            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
-                gatherd_idxs[s : s + k] = i % self.experts_per_rank
-                s += k
-            gatherd_idxs = gatherd_idxs.argsort()
-            sorted_tokens = gathered_tokens[gatherd_idxs]
-            tokens_per_expert = tokens_per_expert_post_gather
-        tokens_per_expert = tokens_per_expert.cpu().numpy()
-
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-            expert_out = expert(tokens_for_this_expert)
-            outputs.append(expert_out)
-            start_idx = end_idx
-
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        if self.ep_size > 1:
-            new_x = torch.empty_like(outs)
-            new_x[gatherd_idxs] = outs
-            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-            dist.all_to_all(
-                list(gathered_tokens.split(input_split_sizes)),
-                list(new_x.split(output_splits)),
-            )
-            outs = gathered_tokens
-
-        new_x = torch.empty_like(outs)
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(new_x.dtype)
+        hidden_states = hidden_states.repeat_interleave(
+            self.num_experts_per_tok, dim=0
         )
-        return final_out
-
+        
+        y = torch.zeros_like(hidden_states) ## Changing empty like to zero like to ensure no high values
+        
+        for i, expert in enumerate(self.experts):
+            expert_device = expert.gate_proj.weight.device
+            y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i].to(expert_device)).to(base_device)
+            
+        y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+        y = y.to(hidden_states.dtype).view(*orig_shape)
+        y = AddAuxiliaryLoss.apply(y, aux_loss)
+    
+    if self.config.n_shared_experts is not None:
+        identity_device = hidden_states.device
+        expert_device = self.shared_experts.gate_proj.weight.device
+        y = y + self.shared_experts(identity.to(expert_device)).to(base_device)
+        
+    return y
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -703,7 +602,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         batch, num_key_value_heads, n_rep, slen, head_dim
     )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
 
 # Copied from transformers.models.llama.modeling_llama.LlamaAttention with Llama->DeepseekV3
 class DeepseekV3Attention(nn.Module):
@@ -737,32 +635,32 @@ class DeepseekV3Attention(nn.Module):
         self.is_causal = True
 
         if self.q_lora_rank is None:
-            self.q_proj = nn.Linear(
+            self.q_proj = FP8Linear(
                 self.hidden_size, self.num_heads * self.q_head_dim, bias=False
             )
         else:
-            self.q_a_proj = nn.Linear(
+            self.q_a_proj = FP8Linear(
                 self.hidden_size, config.q_lora_rank, bias=config.attention_bias
             )
             self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
-            self.q_b_proj = nn.Linear(
+            self.q_b_proj = FP8Linear(
                 config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False
             )
 
-        self.kv_a_proj_with_mqa = nn.Linear(
+        self.kv_a_proj_with_mqa = FP8Linear(
             self.hidden_size,
             config.kv_lora_rank + config.qk_rope_head_dim,
             bias=config.attention_bias,
         )
         self.kv_a_layernorm = DeepseekV3RMSNorm(config.kv_lora_rank)
-        self.kv_b_proj = nn.Linear(
+        self.kv_b_proj = FP8Linear(
             config.kv_lora_rank,
             self.num_heads
             * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
         )
 
-        self.o_proj = nn.Linear(
+        self.o_proj = FP8Linear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=config.attention_bias,
@@ -946,7 +844,6 @@ class DeepseekV3Attention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-
 
 # Copied from transformers.models.llama.modeling_llama.LlamaFlashAttention2 with Llama->DeepseekV3
 class DeepseekV3FlashAttention2(DeepseekV3Attention):
@@ -1224,12 +1121,10 @@ class DeepseekV3FlashAttention2(DeepseekV3Attention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-
 ATTENTION_CLASSES = {
     "eager": DeepseekV3Attention,
     "flash_attention_2": DeepseekV3FlashAttention2,
 }
-
 
 class DeepseekV3DecoderLayer(nn.Module):
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
@@ -1318,7 +1213,6 @@ class DeepseekV3DecoderLayer(nn.Module):
 
         return outputs
 
-
 DeepseekV3_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
@@ -1335,7 +1229,6 @@ DeepseekV3_START_DOCSTRING = r"""
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
-
 @add_start_docstrings(
     "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",
     DeepseekV3_START_DOCSTRING,
@@ -1351,7 +1244,7 @@ class DeepseekV3PreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
+        if isinstance(module, FP8Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -1359,7 +1252,6 @@ class DeepseekV3PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
-
 
 DeepseekV3_INPUTS_DOCSTRING = r"""
     Args:
@@ -1429,7 +1321,6 @@ DeepseekV3_INPUTS_DOCSTRING = r"""
         return_dict (`bool`, *optional*):
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
-
 
 @add_start_docstrings(
     "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",

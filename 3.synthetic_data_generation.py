@@ -12,62 +12,13 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from Distiller import create_empty_layer_fp8, load_model_config
+# from Distiller import create_empty_layer_fp8, load_model_config
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 from modeling_deepseek import _prepare_4d_causal_attention_mask
 
-
-@dataclass
-class PathConfig:
-    model_name: str = "deepseek"
-    base_dir: str = "distillation_runs"
-    checkpoint_dir: str = "layers"
-    intermediate_dir: str = "intermediate_states"
-    exp_states: str = "exp_states"
-    log_dir: str = "distillation_logs"
-    expert_activation_dir: str = "expert_activation"
-
-    def __post_init__(self):
-        for dir_name in [
-            self.base_dir,
-            self.log_dir,
-            self.intermediate_dir,
-            self.exp_states,
-            self.expert_activation_dir,
-        ]:
-            os.makedirs(dir_name, exist_ok=True)
-
-    def get_layer_path(self, layer_idx: int) -> str:
-        return os.path.join(self.checkpoint_dir, f"layer_{layer_idx}.ckpt")
-
-    def get_intermediate_path(self, layer_idx: int, batch_idx: int) -> str:
-        os.makedirs(
-            os.path.join(self.intermediate_dir, f"layer_{layer_idx}"), exist_ok=True
-        )
-        return os.path.join(
-            self.intermediate_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt"
-        )
-
-    def get_exp_path(self, layer_idx: int, batch_idx: int) -> str:
-        os.makedirs(os.path.join(self.exp_states, f"layer_{layer_idx}"), exist_ok=True)
-        return os.path.join(self.exp_states, f"layer_{layer_idx}", f"batch{batch_idx}.pt")
-    
-    def get_expert_activation_path(self, layer_idx: int) -> str:
-        os.makedirs(self.expert_activation_dir, exist_ok=True)
-        return os.path.join(self.expert_activation_dir, f"layer_{layer_idx}.pickle")
-
-    def get_distillation_path(self, n_experts: int, n_active: int) -> str:
-        return os.path.join(
-            self.base_dir, f"{self.model_name}_{n_experts}@{n_active}"
-        )
-
-
-@dataclass
-class GenerationParams:
-    n_batch: int = 128
-    batch_size: int = 16
-    max_length: int = 512
-
+from configs import GenerationParams, PathConfig
+from torch_utils import save_intermediate_state, save_midlayer_state, load_intermediate_state, load_midlayer_state, destruct_module_optimized, memory_cleanup
+from memory_utils import load_model_config, create_empty_layer_fp8
 
 def memory_cleanup():
     """Perform thorough memory cleanup"""
@@ -77,31 +28,9 @@ def memory_cleanup():
         torch.cuda.synchronize()
 
 
-def save_intermediate_state(
-    path_config: PathConfig, layer_idx: int, batch_idx: int, state: torch.Tensor
-):
-    """Save intermediate layer output to a file in FP8 format"""
-    fp8_tensor = state.to(torch.float8_e4m3fn)
-    torch.save(fp8_tensor, path_config.get_intermediate_path(layer_idx, batch_idx))
-
-
-def save_exp_state(
-    path_config: PathConfig, layer_idx: int, batch_idx: int, state: torch.Tensor
-):
-    """Save intermediate layer output to a file in FP8 format"""
-    fp8_tensor = state.to(torch.float8_e4m3fn)
-    torch.save(fp8_tensor, path_config.get_exp_path(layer_idx, batch_idx))
-
-
-def load_intermediate_state(
-    path_config: PathConfig, layer_idx: int, batch_idx: int
-) -> torch.Tensor:
-    """Load intermediate layer output from a file and upcast from FP8"""
-    fp8_tensor = torch.load(path_config.get_intermediate_path(layer_idx, batch_idx))
-    return fp8_tensor.to(torch.bfloat16)
-
-
-def main():
+if __name__ == "__main__":
+    device = "cuda"
+    
     
     params = GenerationParams()
     path_config = PathConfig()
@@ -113,7 +42,7 @@ def main():
     )
     apply_liger_kernel_to_llama()  # Apply LLaMA kernel optimizations
 
-    device = "cuda"
+    
     position_ids = torch.arange(
         0, params.max_length, dtype=torch.long, device=device
     ).unsqueeze(0)
@@ -164,6 +93,7 @@ def main():
             )
         save_intermediate_state(path_config, -1, batch_idx, embeddings)
 
+    destruct_module_optimized(embed_tokens)
     del embed_tokens
     memory_cleanup()
 
@@ -175,7 +105,7 @@ def main():
         print(f"Loading layer {layer_idx}")
         layer = create_empty_layer_fp8(config, layer_idx=layer_idx)
         layer.load_state_dict(
-            torch.load(f"layers/layer_{layer_idx}.pt"), assign=True
+            torch.load(f"layers/layer_{layer_idx}.pt", map_location=device), assign=True
         )
         print("Layer loaded")
 
@@ -185,6 +115,7 @@ def main():
                 range(params.n_batch), desc=f"Processing MLP Layer {layer_idx}"
             ):
                 prev_state = load_intermediate_state(path_config, layer_idx - 1, batch_idx)
+                
                 with torch.no_grad(), torch.amp.autocast(
                     device_type="cuda", dtype=torch.bfloat16
                 ):
@@ -210,6 +141,7 @@ def main():
                     hidden_states = load_intermediate_state(
                         path_config, layer_idx - 1, batch_idx
                     )
+                    
                     residual = hidden_states
                     hidden_states = layer.input_layernorm(hidden_states)
 
@@ -226,7 +158,7 @@ def main():
                     residual = hidden_states
                     hidden_states = layer.post_attention_layernorm(hidden_states)
 
-                    save_exp_state(path_config, layer_idx, batch_idx, hidden_states)
+                    save_midlayer_state(path_config, layer_idx, batch_idx, hidden_states)
 
                     hidden_states = layer.mlp(hidden_states)
                     hidden_states = residual + hidden_states
@@ -242,11 +174,8 @@ def main():
             with open(path_config.get_expert_activation_path(layer_idx), "wb") as f:
                 pickle.dump(top_k_output, f)
 
+        destruct_module_optimized(layer)
         del layer
         memory_cleanup()
 
     writer.close()
-
-
-if __name__ == "__main__":
-    main()

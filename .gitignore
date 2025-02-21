@@ -10,3 +10,5 @@ layers
 temp*
 exp_states/
 expert_activation/
+data
+legacy
