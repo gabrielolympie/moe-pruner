@@ -2,8 +2,10 @@ from safetensors import safe_open
 import bitsandbytes as bnb
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
-from modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3ForCausalLM
+# from modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3ForCausalLM
 from accelerate import init_empty_weights
+from deepseek_v3.configuration_deepseek import DeepseekV3Config
+
 import json
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial

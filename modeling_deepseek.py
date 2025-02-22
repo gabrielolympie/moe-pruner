@@ -566,8 +566,6 @@ class DeepseekV3MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
         
-        print('raw')
-        
         hidden_states = hidden_states.repeat_interleave(
             self.num_experts_per_tok, dim=0
         )
@@ -582,12 +580,12 @@ class DeepseekV3MoE(nn.Module):
         y = y.to(hidden_states.dtype).view(*orig_shape)
         y = AddAuxiliaryLoss.apply(y, aux_loss)
     
-    if self.config.n_shared_experts is not None:
-        identity_device = hidden_states.device
-        expert_device = self.shared_experts.gate_proj.weight.device
-        y = y + self.shared_experts(identity.to(expert_device)).to(base_device)
-        
-    return y
+        if self.config.n_shared_experts is not None:
+            identity_device = hidden_states.device
+            expert_device = self.shared_experts.gate_proj.weight.device
+            y = y + self.shared_experts(identity.to(expert_device)).to(base_device)
+            
+        return y
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -1244,7 +1242,7 @@ class DeepseekV3PreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         std = self.config.initializer_range
-        if isinstance(module, FP8Linear):
+        if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()

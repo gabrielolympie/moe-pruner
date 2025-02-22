@@ -32,6 +32,7 @@ class PathConfig:
     base_dir: str = "data/distillation_runs"
     checkpoint_dir: str = "layers"
     intermediate_dir: str = "data/intermediate_states"
+    midlayer_dir : str = "data/midlayer_states"
     exp_states: str = "data/exp_states"
     log_dir: str = "distillation_logs"
     expert_activation_dir: str = "data/expert_activation"
@@ -55,6 +56,14 @@ class PathConfig:
         )
         return os.path.join(
             self.intermediate_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt"
+        )
+        
+    def get_midlayer_path(self, layer_idx: int, batch_idx: int) -> str:
+        os.makedirs(
+            os.path.join(self.midlayer_dir, f"layer_{layer_idx}"), exist_ok=True
+        )
+        return os.path.join(
+            self.midlayer_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt"
         )
 
     def get_exp_path(self, layer_idx: int, batch_idx: int) -> str:

@@ -3,7 +3,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import shutil
 import os
 
-if __main__=="__name__":
+if __name__=="__main__":
     model_name = "deepseek-ai/DeepSeek-V3"
     local_dir = model_name.split("/")[1].lower().replace('-','_')
     

@@ -1,6 +1,6 @@
 from datasets import load_dataset
 
-if __main__=="__name__":
+if __name__=="__main__":
     dolphin_r1 = load_dataset(
         'cognitivecomputations/dolphin-r1',
         "nonreasoning",
