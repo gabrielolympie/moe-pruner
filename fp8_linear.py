@@ -117,5 +117,5 @@ class FP8Linear(torch.nn.Module):
         self.weight = torch.nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
         
-    def forward(self, x):        
-        return F.linear(x, self.weight_dequant(), self.bias).to(dtype=x.dtype, device=x.device)
+    def forward(self, x): 
+        return F.linear(x, self.weight_dequant().to(x.dtype), self.bias).to(dtype=x.dtype, device=x.device)

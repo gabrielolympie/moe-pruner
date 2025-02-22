@@ -14,9 +14,11 @@ import numpy as np
 import os
 from configs import DistillationParams, PathConfig
 import torch
+from tqdm.auto import tqdm
 
-from memory_utils import create_empty_layer_fp8, load_model_config
+from model_utils import rsetattr, rgetattr, load_model_config, load_weight, map_device, assign_device, get_dataset, get_device_map 
 from torch_utils import load_intermediate_state, load_midlayer_state, memory_cleanup, destruct_module_optimized, count_parameters
+from ademamix import AdEMAMix
 
 class IntermediateStateDataset(Dataset):
     def __init__(self, path_config, layer_idx, start_batch, end_batch):
@@ -30,8 +32,8 @@ class IntermediateStateDataset(Dataset):
 
     def __getitem__(self, idx):
         batch_idx = self.start_batch + idx
-        input_data = load_midlayer_state(self.path_config, self.layer_idx, batch_idx)
-        output_data = load_intermediate_state(self.path_config, self.layer_idx, batch_idx)
+        input_data = load_midlayer_state(self.path_config, self.layer_idx, batch_idx, batch_size=8)
+        output_data = load_intermediate_state(self.path_config, self.layer_idx, batch_idx, batch_size=8)
         return input_data, output_data
 
 def prepare_distilled_moe(
@@ -50,7 +52,7 @@ def prepare_distilled_moe(
     moe_config.n_routed_experts = n_routed_experts
     moe_config.num_experts_per_tok = n_active_experts
     
-    pruned_moe = DeepseekV3MoE(moe_config)
+    pruned_moe = DeepseekV3MoE(moe_config).to(device)
     
     pruned_moe.shared_experts.gate_proj = deepcopy(moe.shared_experts.gate_proj).to(device)
     pruned_moe.shared_experts.up_proj = deepcopy(moe.shared_experts.up_proj).to(device)
@@ -99,8 +101,9 @@ def prepare_distilled_moe(
     return pruned_moe
 
 class MOEDistillerLightningModule(pl.LightningModule):
-    def __init__(self, path_config, params, layer_idx, n_routed_experts, n_active_experts):
+    def __init__(self, weight_map, path_config, params, layer_idx, n_routed_experts, n_active_experts, weights_location):
         super().__init__()
+        self.weight_map = weight_map
         self.path_config = path_config
         self.params = params
         self.distillation_config=params #kept as self.params too.
@@ -110,40 +113,7 @@ class MOEDistillerLightningModule(pl.LightningModule):
         self.n_active_experts = n_active_experts
         self.distillat = None
         self.device_local = self.params.distiller_device
-
-    def setup(self, stage=None):
-        if self.distillat is None:  # Only build if not already built
-            self.build()
-
-    def create(self):
-        ## Create layer
-        weight_map, model_config = load_model_config(self.model_name)
-        layer = create_empty_layer_fp8(model_config, layer_idx=self.layer_idx, device=self.device_local)
-        memory_cleanup()
-        layer.load_state_dict(torch.load(f'layers/layer_{self.layer_idx}.pt', map_location=self.device_local), assign=True)
-        memory_cleanup()
-        ## Get expert activation results
-        with open(f"{self.path_config.expert_activation_dir}/layer_{self.layer_idx}.pickle", "rb") as f:
-            act = pickle.load(f)
-            
-        v,c = np.unique(act, return_counts=True)
-        selected_experts = np.flip(np.argsort(c))
-        
-        distilled_moe = prepare_distilled_moe(
-            layer.mlp,
-            selected_experts,
-            self.n_routed_experts,
-            self.n_active_experts,
-            self.params,
-            device=self.device_local
-        )
-        
-        destruct_module_optimized(layer)
-        memory_cleanup()
-        
-        self.distillat = distilled_moe
-        
-        count_parameters(self.distillat)
+        self.weights_location=weights_location
 
     def forward(self, input_batch):
         return self.distillat(input_batch) ## zero selection as batch are already pre built
@@ -162,8 +132,6 @@ class MOEDistillerLightningModule(pl.LightningModule):
         # Compute mean and std of output_batch
         m = torch.mean(output_batch, dim=-1, keepdim=True)
         s = torch.std(output_batch, dim=-1, keepdim=True)
-
-        print(m,s)
         # Normalize output_batch and pred
         output_batch = (output_batch - m) / s
         pred = (pred - m) / s
@@ -175,6 +143,7 @@ class MOEDistillerLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         input_batch, output_batch = batch
         input_batch, output_batch=input_batch[0], output_batch[0]
+        
         
         pred = self(input_batch)
         
@@ -217,3 +186,60 @@ class MOEDistillerLightningModule(pl.LightningModule):
             }
         }
         
+    def merge_and_save(self):
+        """
+        Load the best checkpoint and save the distillat state to disk.
+        
+        Args:
+            checkpoint_dir (str): Directory containing the checkpoints
+            save_dir (str): Directory where to save the final model
+        """
+        # Find the best checkpoint
+        checkpoint_dir=self.path_config.checkpoint_dir
+        save_dir=self.path_config.get_distillation_path(n_experts=self.n_routed_experts, n_active=self.n_active_experts)
+        
+        # checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.ckpt"))
+        # if not checkpoints:
+        #     raise ValueError(f"No checkpoints found in {checkpoint_dir}")
+            
+        # # Sort checkpoints by validation loss (assuming checkpoint names contain val_loss)
+        # best_checkpoint = None
+        # best_val_loss = float('inf')
+        
+        # for ckpt in checkpoints:
+        #     try:
+        #         checkpoint = torch.load(ckpt, map_location=self.device_local)
+        #         val_loss = checkpoint['val_loss']
+        #         if val_loss < best_val_loss:
+        #             best_val_loss = val_loss
+        #             best_checkpoint = ckpt
+        #     except:
+        #         print(f"Warning: Could not load checkpoint {ckpt}")
+        #         continue
+        
+        # if best_checkpoint is None:
+        #     raise ValueError("Could not find a valid checkpoint")
+            
+        # # Load the best checkpoint
+        # print(f"Loading best checkpoint: {best_checkpoint}")
+        # self.load_from_checkpoint(best_checkpoint)
+        
+        # Create save directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Save the distillat state
+        
+        save_path = save_dir + f"/layer_{self.layer_idx}.pt"
+        
+        ## Merge all adapters in distillat
+        for i in range(self.n_routed_experts):
+            self.distillat.experts[i].gate_proj=self.distillat.experts[i].gate_proj.merge_and_unload()
+            self.distillat.experts[i].up_proj=self.distillat.experts[i].up_proj.merge_and_unload()
+            self.distillat.experts[i].down_proj=self.distillat.experts[i].down_proj.merge_and_unload()
+        
+        
+        torch.save(self.distillat.state_dict(), save_path)
+        print(f"Saved distillat state to: {save_path}")
+        
+        destruct_module_optimized(self.distillat)
+        memory_cleanup()

@@ -7,11 +7,11 @@ def save_quant(x, base_path):
     x = x.view(-1, x.shape[-1])
     weight, weight_scale_inv = act_quant(x, 128)
     torch.save(weight, base_path.replace('.pt', 'weight.pt'))
-    torch.save(weight_scale_inv, base_path.replace('pt', 'weight_scale_inv.pt'))
+    torch.save(weight_scale_inv, base_path.replace('.pt', 'weight_scale_inv.pt'))
     
 def load_quant(base_path, batch_size):
     weight = torch.load(base_path.replace('.pt', 'weight.pt'))
-    weight_scale_inv = torch.load(base_path.replace('pt', 'weight_scale_inv.pt'))
+    weight_scale_inv = torch.load(base_path.replace('.pt', 'weight_scale_inv.pt'))
     x = weight_dequant(weight, weight_scale_inv)
     x = x.view(batch_size, x.shape[0] // batch_size, x.shape[-1])
     return x

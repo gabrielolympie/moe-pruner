@@ -31,65 +31,6 @@ class AdapterBase(nn.Module):
     def merge_and_unload(self):
         raise NotImplementedError
 
-class LoRALinear(AdapterBase):
-    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, device="cuda:0"):
-        super().__init__(base_layer, rank, alpha, dropout, device)
-        self.weight = base_layer.weight
-
-        # self.device=base_layer.device
-        self.dtype=torch.bfloat16
-        
-        # Initialize LoRA matrices with proper scaling
-        self.lora_A = nn.Parameter(
-            torch.empty((rank, base_layer.in_features), dtype=self.dtype, device=self.device)
-        )
-        self.lora_B = nn.Parameter(
-            torch.empty((base_layer.out_features, rank), dtype=self.dtype, device=self.device)
-        )
-        
-        self.reset_parameters()
-        
-    def reset_parameters(self):
-        # Initialize using scaled kaiming initialization
-        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B)
-        
-    def forward(self, x):
-        # Move input to the correct device and dtype
-        x = x.to(device=self.device, dtype=self.dtype)
-            
-        # Base layer output
-        base_out = self.base_layer(x)
-        
-        # LoRA path with improved numerical stability
-        dropout_x = self.dropout(x)
-        lora_out = (dropout_x @ self.lora_A.t() @ self.lora_B.t()) * self.scaling
-        
-        return base_out + lora_out
-    
-    def merge_and_unload(self):
-        """Merge LoRA weights with base weights and return new layer"""
-        merged_weight = self.base_layer._weight_unquantized(torch.float32).to(self.device)
-        merged_weight = merged_weight + (self.lora_B @ self.lora_A) * self.scaling
-        
-        new_layer = type(self.base_layer)(
-            self.base_layer.in_features,
-            self.base_layer.out_features,
-            bias=self.base_layer.bias is not None,
-            device=self.device,
-            fp8_format=getattr(self.base_layer, 'fp8_format', None)
-        )
-        
-        if hasattr(new_layer, 'from_weight_matrix'):
-            new_layer.from_weight_matrix(merged_weight)
-        else:
-            new_layer.weight = nn.Parameter(merged_weight)
-            
-        if self.base_layer.bias is not None:
-            new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.device))
-            
-        return new_layer
-
 class DoRALinear(AdapterBase):
     def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, dora_simple=True, device="cuda:0"):
         super().__init__(base_layer, rank, alpha, dropout, device)
@@ -120,7 +61,7 @@ class DoRALinear(AdapterBase):
         # Initialize magnitude component from base weights
         with torch.no_grad():
             base_norm = torch.linalg.norm(
-                self.base_layer._weight_unquantized(self.dtype).to(self.device), 
+                self.base_layer.weight_dequant().to(self.device, dtype=self.dtype),
                 dim=1, 
                 keepdim=True
             )
@@ -128,7 +69,7 @@ class DoRALinear(AdapterBase):
     
     def forward(self, x):        
         # Get base weight and ensure it's on the correct device
-        base_weight = self.base_layer._weight_unquantized(self.dtype).to(self.device)
+        base_weight = self.base_layer.weight_dequant().to(self.device, dtype=self.dtype)
 
         # Calculate new weight with LoRA
         new_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
@@ -157,31 +98,26 @@ class DoRALinear(AdapterBase):
     
     def merge_and_unload(self):
         """Merge DoRA weights with base weights and return new layer"""
-        new_weight = self.base_layer._weight_unquantized(self.dtype).to(self.device)
+        new_weight = self.base_layer.weight_dequant().to(dtype=self.dtype)
         
-        new_weight = new_weight + (self.lora_B @ self.lora_A) * self.scaling
+        new_weight = new_weight.to('cpu') + (self.lora_B.to('cpu') @ self.lora_A.to('cpu')) * self.scaling
         
         # Apply magnitude scaling
         base_norm = torch.linalg.norm(new_weight, dim=1, keepdim=True)
         
-        norm_scale = self.weight_m / base_norm
+        norm_scale = self.weight_m.to('cpu') / base_norm
 
         # print(new_weight.shape, norm_scale.shape)
         merged_weight = new_weight * norm_scale
         
-        new_layer = type(self.base_layer)(
+        new_layer = FP8Linear(
             self.base_layer.in_features,
             self.base_layer.out_features,
             bias=self.base_layer.bias is not None,
             device=self.device,
-            fp8_format=getattr(self.base_layer, 'fp8_format', None)
         )
         
-        if hasattr(new_layer, 'from_weight_matrix'):
-            new_layer.from_weight_matrix(merged_weight)
-        else:
-            new_layer.weight = nn.Parameter(merged_weight)
-            
+        new_layer.weight_quant = merged_weight
         if self.base_layer.bias is not None:
             new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.device))
             

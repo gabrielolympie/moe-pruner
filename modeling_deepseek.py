@@ -578,7 +578,7 @@ class DeepseekV3MoE(nn.Module):
             
         y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
         y = y.to(hidden_states.dtype).view(*orig_shape)
-        y = AddAuxiliaryLoss.apply(y, aux_loss)
+        # y = AddAuxiliaryLoss.apply(y, aux_loss)
     
         if self.config.n_shared_experts is not None:
             identity_device = hidden_states.device

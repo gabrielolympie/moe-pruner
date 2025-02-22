@@ -3,7 +3,7 @@ import os
 
 @dataclass
 class GenerationParams:
-    n_batch: int = 4
+    n_batch: int = 256
     batch_size: int = 8
     max_length: int = 512
 
@@ -29,8 +29,8 @@ class DistillationParams:
 @dataclass
 class PathConfig:
     model_name: str = "deepseek_v3"
-    base_dir: str = "data/distillation_runs"
-    checkpoint_dir: str = "layers"
+    base_dir: str = "distillation_runs"
+    checkpoint_dir: str = "checkpoints"
     intermediate_dir: str = "data/intermediate_states"
     midlayer_dir : str = "data/midlayer_states"
     exp_states: str = "data/exp_states"
