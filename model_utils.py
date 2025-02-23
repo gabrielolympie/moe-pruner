@@ -63,12 +63,12 @@ def load_weight(
             if len(shape) > 1:
                 vocab_size, hidden_dim = shape
                 # Add non_blocking=True
-                tensor = torch.nn.Parameter(tensor_slice[:, :hidden_dim].cuda(device), requires_grad=False)
+                tensor = torch.nn.Parameter(tensor_slice[:, :hidden_dim].cuda(device), requires_grad=False).cuda(device)
             else:
-                tensor = torch.nn.Parameter(tensor_slice[:].cuda(device), requires_grad=False)
+                tensor = torch.nn.Parameter(tensor_slice[:].cuda(device), requires_grad=False).cuda(device)
             return tensor
 
-def map_device(weight_name, layer_idx=-1, device="cuda:0"):
+def map_device(weight_name, layer_idx=-1, device="meta"):
     if layer_idx == -1:
         if not("layers" in weight_name):
             return device

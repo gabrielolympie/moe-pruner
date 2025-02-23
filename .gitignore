@@ -13,3 +13,4 @@ expert_activation/
 data
 legacy
 checkpoints
+distillation_runs

@@ -552,16 +552,16 @@ class DeepseekV3MoE(nn.Module):
             )
 
     def forward(self, hidden_states):
-        base_device=hidden_states.device
+        # base_device=hidden_states.device
         
         identity = hidden_states
         orig_shape = hidden_states.shape
         
-        hidden_states.to(self.gate.weight.device)
+        # hidden_states.to(self.gate.weight.device)
         
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         
-        hidden_states.to(base_device)
+        # hidden_states.to(base_device)
         
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
@@ -573,17 +573,17 @@ class DeepseekV3MoE(nn.Module):
         y = torch.zeros_like(hidden_states) ## Changing empty like to zero like to ensure no high values
         
         for i, expert in enumerate(self.experts):
-            expert_device = expert.gate_proj.weight.device
-            y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i].to(expert_device)).to(base_device)
+            # expert_device = expert.gate_proj.weight.device
+            y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i]) #.to(expert_device)).to(base_device)
             
         y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
         y = y.to(hidden_states.dtype).view(*orig_shape)
         # y = AddAuxiliaryLoss.apply(y, aux_loss)
     
         if self.config.n_shared_experts is not None:
-            identity_device = hidden_states.device
-            expert_device = self.shared_experts.gate_proj.weight.device
-            y = y + self.shared_experts(identity.to(expert_device)).to(base_device)
+            # identity_device = hidden_states.device
+            # expert_device = self.shared_experts.gate_proj.weight.device
+            y = y + self.shared_experts(identity) #.to(expert_device)).to(base_device)
             
         return y
 

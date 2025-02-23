@@ -5,7 +5,7 @@ import torch
 from Distiller import IntermediateStateDataset, prepare_distilled_moe, MOEDistillerLightningModule
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping  
 from pytorch_lightning.loggers import TensorBoardLogger
 import torch.multiprocessing as mp
 from ademamix import AdEMAMix
@@ -18,14 +18,14 @@ from modeling_deepseek import DeepseekV3DecoderLayer, DeepseekV3MoE, DeepseekV3F
 from tqdm.auto import tqdm
 import pickle
 
-# python 4.layer_distillation.py  --device cuda:0 --n_routed_experts 8 --n_active_experts 4 --min_layer 58 --max_layer 59
+# python 4.layer_distillation.py --device cuda:0 --n_routed_experts 8 --n_active_experts 4 --min_layer 3 --max_layer 32
+# python 4.layer_distillation.py --device cuda:1 --n_routed_experts 8 --n_active_experts 4 --min_layer 32 --max_layer 61
 
 if __name__ == "__main__":
     print("Starting the pipeline...")
     
     
     mp.set_start_method('spawn', force=True)
-    
     torch.backends.cuda.max_split_size_mb = 512
     torch.set_float32_matmul_precision('medium')
 
@@ -56,8 +56,13 @@ if __name__ == "__main__":
     min_layer = args.min_layer
     max_layer = args.max_layer
     
+    dev=device.split(':')[1]
+    os.environ["CUDA_VISIBLE_DEVICES"] = dev  # limit all gpu to only one, to enable parallel run
+    
+    device="cuda:0" ## now only cuda 0 is available
+    
     params = DistillationParams(
-        n_epochs=2,
+        n_epochs=15,
         n_batch=256,
         n_train_batch=232,
         batch_size=8,
@@ -82,6 +87,7 @@ if __name__ == "__main__":
         model = DeepseekV3ForCausalLM(config)
     
     for layer_idx in range(min_layer,max_layer):
+        
         print("Loading dataset...")
         full_dataset = IntermediateStateDataset(path_config, layer_idx, 0, params.n_batch)
         
@@ -93,6 +99,7 @@ if __name__ == "__main__":
 
             # Define dataloaders
         print("Creating dataloaders...")
+        
         train_loader = DataLoader(
             train_dataset,
             batch_size=1,
@@ -101,6 +108,7 @@ if __name__ == "__main__":
             persistent_workers=True,
             prefetch_factor=4
         )
+        
         val_loader = DataLoader(
             val_dataset,
             batch_size=1,
@@ -109,13 +117,11 @@ if __name__ == "__main__":
             persistent_workers=True,
             prefetch_factor=4
         )
+        
         print("Dataloaders created.")
 
         print("Initializing model...")
         
-
-        
-
         device_map = get_device_map(layer_idx, weight_map, device)
         model.model.layers[layer_idx] = model.model.layers[layer_idx].to_empty(device=device)
         
@@ -123,6 +129,9 @@ if __name__ == "__main__":
             rsetattr(model, weight_name, load_weight(weights_location, weight_name, weight_map, device))
             if i%100 ==0:
                 memory_cleanup()
+                
+        model.model.layers[layer_idx] = model.model.layers[layer_idx].to(device)  ## remove leftover not handled by accelerate
+        memory_cleanup()
                 
         with open(f"{path_config.expert_activation_dir}/layer_{layer_idx}.pickle", "rb") as f:
             act = pickle.load(f)
@@ -168,19 +177,24 @@ if __name__ == "__main__":
             monitor="val_loss",
             mode="min"
         )
+        
+        early_stop_callback = EarlyStopping(
+            monitor='val_loss',  # Monitor validation loss
+            min_delta=0.0005,       # Minimum change in the monitored quantity to qualify as an improvement
+            patience=2,          # Number of epochs with no improvement after which training will be stopped
+            verbose=True,        # Print a message when training is stopped
+            mode='min'            # Training will stop when the quantity monitored has stopped decreasing
+        )
+        
         print("Logger and checkpoint callback setup.")
-
-        # Define trainer
-        print("Initializing trainer...")
-        dev=int(params.distiller_device.split(':')[1])
         
         print(dev)
         trainer = pl.Trainer(
             max_epochs=params.n_epochs,
             accelerator="gpu",
-            devices=[dev],
+            devices=1,
             logger=logger,
-            callbacks=[checkpoint_callback],
+            callbacks=[checkpoint_callback, early_stop_callback],
             precision="bf16-mixed",
             gradient_clip_val=1.0,
             accumulate_grad_batches=params.gradient_accumulation_steps,
@@ -188,6 +202,7 @@ if __name__ == "__main__":
             log_every_n_steps=1,
             # strategy="ddp"  # Add strategy for multi-gpu training
         )
+        
         print("Trainer initialized.")
 
         print("Starting training...")

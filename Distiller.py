@@ -52,7 +52,9 @@ def prepare_distilled_moe(
     moe_config.n_routed_experts = n_routed_experts
     moe_config.num_experts_per_tok = n_active_experts
     
-    pruned_moe = DeepseekV3MoE(moe_config).to(device)
+    with torch.device(device):
+        pruned_moe = DeepseekV3MoE(moe_config).to(device)
+    memory_cleanup()
     
     pruned_moe.shared_experts.gate_proj = deepcopy(moe.shared_experts.gate_proj).to(device)
     pruned_moe.shared_experts.up_proj = deepcopy(moe.shared_experts.up_proj).to(device)
@@ -84,7 +86,7 @@ def prepare_distilled_moe(
         pruned_moe.experts[i].up_proj = AdapterClass(expert.up_proj, **adapter_kwargs).to(device)
         pruned_moe.experts[i].down_proj = AdapterClass(expert.down_proj, **adapter_kwargs).to(device)
 
-    pruned_moe.to(device)
+    pruned_moe=pruned_moe.to(device)
 
     # Set requires_grad for adapter parameters only
     for name, param in pruned_moe.named_parameters():
@@ -101,8 +103,8 @@ def prepare_distilled_moe(
     return pruned_moe
 
 class MOEDistillerLightningModule(pl.LightningModule):
-    def __init__(self, weight_map, path_config, params, layer_idx, n_routed_experts, n_active_experts, weights_location):
-        super().__init__()
+    def __init__(self, weight_map, path_config, params, layer_idx, n_routed_experts, n_active_experts, weights_location, **kwargs):
+        super().__init__(**kwargs)
         self.weight_map = weight_map
         self.path_config = path_config
         self.params = params
@@ -163,7 +165,7 @@ class MOEDistillerLightningModule(pl.LightningModule):
         self.log("val_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
         return loss
 
-    def configure_optimizers(self):
+    def configure_optimizers(self):             
         optimizer = AdEMAMix(
             filter(lambda p: p.requires_grad, self.distillat.parameters()),
             lr=self.params.learning_rate,
