@@ -1343,13 +1343,15 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
                 position_ids = position_ids.to(layer_device)
                 memory_cleanup() ## Clean memory after transition
                 
-            if past_key_values:
+            if past_key_values is not None:
+                # if layer_device != past_key_values.device:
                 past_key_values = past_key_values.to(layer_device)
                 memory_cleanup() ## Clean memory after transition
                 
-            if attention_mask:
-                attention_mask = attention_mask.to(layer_device)
-                memory_cleanup() ## Clean memory after transition
+            if attention_mask is not None:
+                if layer_device != attention_mask.device:
+                    attention_mask = attention_mask.to(layer_device)
+                    memory_cleanup() ## Clean memory after transition
                 
             layer_outputs = decoder_layer(
                 hidden_states,
@@ -1507,7 +1509,7 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
             
-            logits=None
+            logits=logits.to('cpu')
             memory_cleanup()
 
         if not return_dict:
@@ -1534,7 +1536,7 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_length()
+                max_cache_length = None # past_key_values.get_max_length()
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None

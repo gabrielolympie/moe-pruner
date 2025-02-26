@@ -167,7 +167,41 @@ class HQQDORA(nn.Module):
         result = result / column_norm.view(1, 1, -1)  # unit vector result.
         result = self.magnitude_layer(result)  # rescaled result.
         return result
+    
+class BNBDORA(nn.Module):
+    def __init__(self, base_layer, lora_rank, *args, **kwargs):
+        super().__init__()
+        self.base_layer = base_layer
+        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
+        device = next(base_layer.parameters()).device
+        
+        # Init trainable magnitude parameter.
+        self.magnitude_layer = MagnitudeLayer(self.base_layer.dora_scale.clone().to(dtype=dtype), device, dtype)
+        self.base_layer.dora_scale = None
+        torch.cuda.empty_cache()
+        
+        # Init DORA layers.
+        self.dora_layer = DORALayer(base_layer.in_features, base_layer.out_features, lora_rank, device, dtype, *args, **kwargs)
 
+    def forward(self, x, *args, **kwargs):
+        result = self.base_layer(x, *args, **kwargs)
+        result = result.clone()
+
+        requires_conversion = not torch.is_autocast_enabled()
+        if requires_conversion:
+            expected_dtype = result.dtype
+            x = x.to(self.dora_layer.lora_A.weight.dtype)
+
+        # m * (W + AB / ||W + AB||) @ X == m * ((W @ X + AB @ X) / ||W + AB||)
+        output, column_norm = self.dora_layer(x, bnb.functional.dequantize_4bit(self.base_layer.weight.data, 
+                                                                                self.base_layer.weight.quant_state))
+        if requires_conversion:
+            output = output.to(expected_dtype)
+        
+        result += output        
+        result = result / column_norm.view(1,1,-1) #unit vector result.
+        result = self.magnitude_layer(result) #rescaled result.
+        return result
 
 def quantize(module):
     
