@@ -58,13 +58,19 @@ from transformers.utils.import_utils import is_torch_fx_available
 from configuration_deepseek import DeepseekV3Config
 import torch.distributed as dist
 import numpy as np
+import gc
+
+def memory_cleanup():
+    """Perform thorough memory cleanup"""
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-
-
-from fp8_linear import FP8Linear
 
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
@@ -368,9 +374,9 @@ class DeepseekV3MLP(nn.Module):
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
         self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
 
-        self.gate_proj = FP8Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = FP8Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = FP8Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
@@ -498,8 +504,6 @@ class DeepseekV3MoE(nn.Module):
         identity = hidden_states
         orig_shape = hidden_states.shape
 
-        # hidden_states.to(self.gate.weight.device)
-
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
 
         # hidden_states.to(base_device)
@@ -512,7 +516,6 @@ class DeepseekV3MoE(nn.Module):
         y = torch.zeros_like(hidden_states)  ## Changing empty like to zero like to ensure no high values
 
         for i, expert in enumerate(self.experts):
-            # expert_device = expert.gate_proj.weight.device
             y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])  # .to(expert_device)).to(base_device)
 
         y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
@@ -520,8 +523,6 @@ class DeepseekV3MoE(nn.Module):
         # y = AddAuxiliaryLoss.apply(y, aux_loss)
 
         if self.config.n_shared_experts is not None:
-            # identity_device = hidden_states.device
-            # expert_device = self.shared_experts.gate_proj.weight.device
             y = y + self.shared_experts(identity)  # .to(expert_device)).to(base_device)
 
         return y
@@ -572,25 +573,25 @@ class DeepseekV3Attention(nn.Module):
         self.is_causal = True
 
         if self.q_lora_rank is None:
-            self.q_proj = FP8Linear(self.hidden_size, self.num_heads * self.q_head_dim, bias=False)
+            self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.q_head_dim, bias=False)
         else:
-            self.q_a_proj = FP8Linear(self.hidden_size, config.q_lora_rank, bias=config.attention_bias)
+            self.q_a_proj = nn.Linear(self.hidden_size, config.q_lora_rank, bias=config.attention_bias)
             self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
-            self.q_b_proj = FP8Linear(config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False)
+            self.q_b_proj = nn.Linear(config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False)
 
-        self.kv_a_proj_with_mqa = FP8Linear(
+        self.kv_a_proj_with_mqa = nn.Linear(
             self.hidden_size,
             config.kv_lora_rank + config.qk_rope_head_dim,
             bias=config.attention_bias,
         )
         self.kv_a_layernorm = DeepseekV3RMSNorm(config.kv_lora_rank)
-        self.kv_b_proj = FP8Linear(
+        self.kv_b_proj = nn.Linear(
             config.kv_lora_rank,
             self.num_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
         )
 
-        self.o_proj = FP8Linear(
+        self.o_proj = nn.Linear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=config.attention_bias,
@@ -1066,6 +1067,8 @@ class DeepseekV3DecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+    
+        
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1087,7 +1090,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
+        
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -1283,15 +1286,24 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
+            
             position_ids = torch.arange(
                 past_key_values_length,
                 seq_length + past_key_values_length,
                 dtype=torch.long,
                 device=device,
             )
+            
             position_ids = position_ids.unsqueeze(0)
 
         if inputs_embeds is None:
+            layer_device=next(self.embed_tokens.parameters()).device
+            input_ids_device=input_ids.device
+            
+            if layer_device != input_ids_device:
+                input_ids=input_ids.to(layer_device)
+                memory_cleanup() ## Clean memory after transition
+                
             inputs_embeds = self.embed_tokens(input_ids)
 
         if self._use_flash_attention_2:
@@ -1319,13 +1331,26 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            ## Cast hidden states and position id to the same device as decoder layer
-            src_device = hidden_states.device
-            layer_device = decoder_layer.self_attn.q_a_proj.weight.device
-
-            hidden_states = hidden_states.to(layer_device)
-            position_ids = position_ids.to(layer_device)
-
+            ## Cast hidden states and position id to the same device as decoder layer            
+            layer_device=next(decoder_layer.parameters()).device
+            hidden_states_device=hidden_states.device
+            
+            if layer_device != hidden_states_device:
+                hidden_states=hidden_states.to(layer_device)
+                memory_cleanup() ## Clean memory after transition
+                
+            if layer_device != position_ids.device:
+                position_ids = position_ids.to(layer_device)
+                memory_cleanup() ## Clean memory after transition
+                
+            if past_key_values:
+                past_key_values = past_key_values.to(layer_device)
+                memory_cleanup() ## Clean memory after transition
+                
+            if attention_mask:
+                attention_mask = attention_mask.to(layer_device)
+                memory_cleanup() ## Clean memory after transition
+                
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -1337,15 +1362,19 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
 
             hidden_states = layer_outputs[0]
 
-            ## Send back to source device
-            hidden_states = hidden_states.to(src_device)
-            position_ids = position_ids.to(src_device)
-
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+
+        layer_device=next(self.norm.parameters()).device
+        hidden_states_device=hidden_states.device
+        
+        if layer_device != hidden_states_device:
+            hidden_states=hidden_states.to(layer_device)
+            memory_cleanup() ## Clean memory after transition
 
         hidden_states = self.norm(hidden_states)
 
@@ -1358,6 +1387,7 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
             next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+        
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -1454,6 +1484,13 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
         )
 
         hidden_states = outputs[0]
+        
+        layer_device=next(self.lm_head.parameters()).device
+        hidden_states_device=hidden_states.device
+        if layer_device != hidden_states_device:
+            hidden_states=hidden_states.to(layer_device)
+            memory_cleanup() ## Clean memory after transition
+        
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
@@ -1469,6 +1506,9 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+            
+            logits=None
+            memory_cleanup()
 
         if not return_dict:
             output = (logits,) + outputs[1:]

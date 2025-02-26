@@ -14,3 +14,5 @@ data
 legacy
 checkpoints
 distillation_runs
+pl_logs/
+deepseek_v3_8a4/

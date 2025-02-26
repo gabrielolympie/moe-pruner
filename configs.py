@@ -1,17 +1,19 @@
 from dataclasses import dataclass
 import os
 
+
 @dataclass
 class GenerationParams:
     n_batch: int = 256
     batch_size: int = 8
     max_length: int = 512
 
+
 @dataclass
 class DistillationParams:
     n_epochs: int = 1
     n_batch: int = 128
-    n_train_batch : int = 116
+    n_train_batch: int = 116
     batch_size: int = 16
     max_length: int = 512
     gradient_accumulation_steps: int = 1
@@ -26,13 +28,14 @@ class DistillationParams:
     fp8_format: str = "e4m3"
     distiller_device: str = "cuda:1"
 
+
 @dataclass
 class PathConfig:
     model_name: str = "deepseek_v3"
     base_dir: str = "distillation_runs"
     checkpoint_dir: str = "checkpoints"
     intermediate_dir: str = "data/intermediate_states"
-    midlayer_dir : str = "data/midlayer_states"
+    midlayer_dir: str = "data/midlayer_states"
     exp_states: str = "data/exp_states"
     log_dir: str = "distillation_logs"
     expert_activation_dir: str = "data/expert_activation"
@@ -51,31 +54,20 @@ class PathConfig:
         return os.path.join(self.checkpoint_dir, f"layer_{layer_idx}.ckpt")
 
     def get_intermediate_path(self, layer_idx: int, batch_idx: int) -> str:
-        os.makedirs(
-            os.path.join(self.intermediate_dir, f"layer_{layer_idx}"), exist_ok=True
-        )
-        return os.path.join(
-            self.intermediate_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt"
-        )
-        
+        os.makedirs(os.path.join(self.intermediate_dir, f"layer_{layer_idx}"), exist_ok=True)
+        return os.path.join(self.intermediate_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt")
+
     def get_midlayer_path(self, layer_idx: int, batch_idx: int) -> str:
-        os.makedirs(
-            os.path.join(self.midlayer_dir, f"layer_{layer_idx}"), exist_ok=True
-        )
-        return os.path.join(
-            self.midlayer_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt"
-        )
+        os.makedirs(os.path.join(self.midlayer_dir, f"layer_{layer_idx}"), exist_ok=True)
+        return os.path.join(self.midlayer_dir, f"layer_{layer_idx}", f"batch{batch_idx}.pt")
 
     def get_exp_path(self, layer_idx: int, batch_idx: int) -> str:
         os.makedirs(os.path.join(self.exp_states, f"layer_{layer_idx}"), exist_ok=True)
         return os.path.join(self.exp_states, f"layer_{layer_idx}", f"batch{batch_idx}.pt")
-    
+
     def get_expert_activation_path(self, layer_idx: int) -> str:
         os.makedirs(self.expert_activation_dir, exist_ok=True)
         return os.path.join(self.expert_activation_dir, f"layer_{layer_idx}.pickle")
 
     def get_distillation_path(self, n_experts: int, n_active: int) -> str:
-        return os.path.join(
-            self.base_dir, f"{self.model_name}_{n_experts}@{n_active}"
-        )
-
+        return os.path.join(self.base_dir, f"{self.model_name}_{n_experts}@{n_active}")
