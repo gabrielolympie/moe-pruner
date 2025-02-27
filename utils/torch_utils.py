@@ -1,0 +1,125 @@
+from utils.fp8_linear import act_quant, weight_dequant
+from safetensors import safe_open
+from datasets import load_dataset
+from tqdm.auto import tqdm
+import functools
+import torch
+import gc
+
+def rsetattr(obj, attr, val):
+    pre, _, post = attr.rpartition(".")
+    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
+
+def rgetattr(obj, attr, *args):
+    def _getattr(obj, attr):
+        return getattr(obj, attr, *args)
+
+    return functools.reduce(_getattr, [obj] + attr.split("."))
+
+def rhasattr(obj, attr):
+    try:
+        a = rgetattr(obj, attr)
+        return True
+    except AttributeError:
+        return False
+
+def save_quant(x, base_path):
+    torch.save(x, base_path.replace(".pt", "weight.pt"))
+
+
+def load_quant(base_path):
+    weight = torch.load(base_path.replace(".pt", "weight.pt"))
+    return weight
+
+def destruct_module_optimized(module: torch.nn.Module) -> torch.nn.Module:
+    """Efficiently destroy module and clear memory."""
+    module.to_empty(device="meta")
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def memory_cleanup():
+    """Perform thorough memory cleanup"""
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def count_parameters(model):
+    frozen_params = 0
+    non_frozen_params = 0
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            non_frozen_params += param.numel()
+        else:
+            frozen_params += param.numel()
+
+    total_params = frozen_params + non_frozen_params
+
+    print(f"{'Parameter Type':<20} {'Count':<10}")
+    print(f"{'='*20} {'='*10}")
+    print(f"{'Frozen Parameters':<20} {frozen_params:<10,}")
+    print(f"{'Non-Frozen Parameters':<20} {non_frozen_params:<10,}")
+    print(f"{'Total Parameters':<20} {total_params:<10,}")
+
+def load_weight(
+    weights_location: str,
+    weight_name: str,
+    weight_map: dict,
+    device: int,
+) -> torch.Tensor:
+    """Load weight with non-blocking CUDA operations."""
+    weight_file = weight_map[weight_name]
+    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        file_path = f"{weights_location}/{weight_file}"
+        with safe_open(file_path, framework="pt", device=str(device)) as f:
+            tensor_slice = f.get_slice(weight_name)
+            shape = tensor_slice.get_shape()
+            if len(shape) > 1:
+                vocab_size, hidden_dim = shape
+                tensor = torch.nn.Parameter(tensor_slice[:, :hidden_dim].to(device), requires_grad=False).to(device)
+            else:
+                tensor = torch.nn.Parameter(tensor_slice[:].to(device), requires_grad=False).to(device)
+            return tensor
+        
+def get_nonreasoning_dataset(tokenizer, generation_config):
+    calibration = load_dataset("cognitivecomputations/dolphin-r1", "nonreasoning", cache_dir="../dolphin-r1")["train"]
+
+    def filter_function(example):
+        if example["overall_quality"] is not None and example["overall_quality"] == 5:
+            return True
+        if example["score"] is not None and example["score"] >= 0.2:
+            return True
+        return False
+
+    calibration = calibration.filter(filter_function)
+
+    data = calibration["messages"][: generation_config.batch_size * generation_config.n_batch]
+
+    train_dataset = [
+        tokenizer.apply_chat_template(elt, tokenize=False, add_generation_prompt=False)
+        for elt in tqdm(data, desc="Preparing dataset")
+    ]
+    return train_dataset
+
+def load_weights(model, model_name, weight_map, target_modules, device):
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        for i, weight_name in enumerate(tqdm(weight_map)):
+            if any([target in weight_name for target in target_modules]):
+                rsetattr(
+                    model,
+                    weight_name,
+                    load_weight(
+                        model_name,
+                        weight_name,
+                        weight_map,
+                        device=device
+                    )
+                )
+            if i % 1000 == 0:
+                memory_cleanup()
+    stream.synchronize()
+    return model

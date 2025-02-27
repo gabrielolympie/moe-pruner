@@ -34,18 +34,6 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from threading import Semaphore
 
 
-def rsetattr(obj, attr, val):
-    pre, _, post = attr.rpartition(".")
-    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
-
-
-def rgetattr(obj, attr, *args):
-    def _getattr(obj, attr):
-        return getattr(obj, attr, *args)
-
-    return functools.reduce(_getattr, [obj] + attr.split("."))
-
-
 def load_model_config(model_name: str):
     """Load model configuration and weight map efficiently."""
     with open(f"{model_name}/model.safetensors.index.json", "r") as f:
@@ -60,41 +48,6 @@ def load_model_config(model_name: str):
     return weight_map, config
 
 
-def load_weight(
-    weights_location: str,
-    weight_name: str,
-    weight_map: dict,
-    device: int,
-) -> torch.Tensor:
-    """Load weight with non-blocking CUDA operations."""
-    weight_file = weight_map[weight_name]
-    # Use non_blocking=True for CUDA operations
-    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-        file_path = f"{weights_location}/{weight_file}"
-        with safe_open(file_path, framework="pt", device=str(device)) as f:
-            tensor_slice = f.get_slice(weight_name)
-            shape = tensor_slice.get_shape()
-            if len(shape) > 1:
-                vocab_size, hidden_dim = shape
-                # Add non_blocking=True
-                tensor = torch.nn.Parameter(tensor_slice[:, :hidden_dim].to(device), requires_grad=False).to(device)
-            else:
-                tensor = torch.nn.Parameter(tensor_slice[:].to(device), requires_grad=False).to(device)
-            return tensor
-
-
-def map_device(weight_name, layer_idx=-1, device="meta"):
-    if layer_idx == -1:
-        if not ("layers" in weight_name):
-            return device
-    else:
-        if f"layers.{layer_idx}." in weight_name:
-            return device
-    return "meta"
-
-
-def assign_device(layer_idx, n_devices):
-    return f"cuda:{layer_idx%n_devices}"
 
 
 def get_dataset():
@@ -116,13 +69,3 @@ def get_dataset():
         for elt in tqdm(data, desc="Preparing dataset")
     ]
     return train_dataset
-
-
-def get_device_map(layer_idx, weight_map, device):
-    device_map = {}
-    for k in weight_map:
-        d = map_device(k, layer_idx=layer_idx, device=device)
-
-        if d != "meta":
-            device_map[k] = d
-    return device_map

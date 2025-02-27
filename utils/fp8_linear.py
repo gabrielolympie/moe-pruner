@@ -3,21 +3,6 @@ from typing import Tuple, Optional
 import torch
 
 
-def highest_power_of_2_divisor(n):
-    if n == 0:
-        return 0
-
-    powers_of_2 = [1, 2, 4, 8, 16, 32, 64, 128]  # Powers of 2 below 128
-
-    highest_divisor = 0
-    for power in reversed(powers_of_2):  # Iterate in descending order
-        if n % power == 0:
-            highest_divisor = power
-            break  # Found the highest, no need to continue
-
-    return highest_divisor
-
-
 def act_quant(x, bloc_size=128):
     # Calculate actual block sizes based on input dimensions
     h_blocks = (x.shape[0] + bloc_size - 1) // bloc_size
