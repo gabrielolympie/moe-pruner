@@ -11,6 +11,7 @@ import torch
 
 from awq.modules.linear.gemm import WQLinear_GEMM
 from awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
+from mergekit.merge_methods.sce import sce_merge
 
 from utils.torch_utils import load_quant, rsetattr
 from utils.ademamix import AdEMAMix
@@ -221,6 +222,7 @@ def create_gate(gate, inv_mapping_dict, layer_norm, path_config, distillation_co
     for i in range(distillation_config.target_routed_expert):
         expert_indices.extend(inv_mapping_dict[i])
         expert_boundaries.append(len(expert_indices))
+        
     expert_indices = np.array(expert_indices)
     expert_boundaries = np.array(expert_boundaries)
 
@@ -292,150 +294,152 @@ def create_gate(gate, inv_mapping_dict, layer_norm, path_config, distillation_co
     #         progress_bar.set_postfix(loss=loss.item())
     return gate
 
-def calibrated_merge_experts(expert_list, layer_norm, distillation_config, distilled_mlp, path_config, layer_idx):
-    """
-    Iteratively merge experts using pairwise SLERP with calibration after each merge.
+def prepare_distillat_state_cl(distilled_mlp, layer_norm, scoring_func, distillation_config, path_config, layer_idx, device):
+    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{0}"))[:, distillation_config.skip_first_tokens].to(device)
+    hidden_states = layer_norm(hidden_states)
+    hidden_states=torch.stack([distilled_mlp.experts[elt](hidden_states) for elt in range(len(distilled_mlp.experts))])
+    affinity_matrix = build_affinity_matrix(hidden_states)
     
-    The algorithm:
-    1. Applies SLERP to experts two by two (if number is odd, one is left for the next round)
-    2. Runs one epoch of calibration on each merged result based on the specific experts merged
-    3. Stops when only one expert remains
+    mapping_dict, inv_mapping_dict=expert_clustering(affinity_matrix, distillation_config.target_routed_expert)
     
-    Args:
-        expert_list: List of expert indices to merge
-        layer_norm: Layer normalization module
-        distillation_config: Configuration for distillation
-        distilled_mlp: MLP module containing the experts
-        path_config: Configuration for file paths
-        layer_idx: Current layer index
+    ## Build new gate
+    distilled_mlp.gate=create_gate(
+        distilled_mlp.gate,
+        inv_mapping_dict,
+        layer_norm,
+        path_config,
+        distillation_config,
+        layer_idx,
+        scoring_func=scoring_func,
+        device=device
+    )
+    
+    distilled_mlp.gate=distilled_mlp.gate.to(dtype=torch.bfloat16)
+    
+    
+    ## Dequant and merge the experts
+    new_experts=deepcopy(distilled_mlp.experts[:distillation_config.target_routed_expert])
+    
+    for i, expert_list in tqdm(inv_mapping_dict.items()):
+        expert_to_merge=[]
+        for expert_index in tqdm(expert_list, leave=False):
+            module = distilled_mlp.experts[expert_index].to(device)
+            module_dequant = calibrated_dequant(module, layer_norm, path_config, layer_idx)
+            expert_to_merge.append(module_dequant)
         
-    Returns:
-        The final merged expert
-    """
-    # First, load all the experts
-    print(f"Loading {len(expert_list)} experts for iterative merging")
-    experts_map = {}  # Map to store the experts by their original index
-    
-    for expert_index in tqdm(expert_list):
-        module = distilled_mlp.experts[expert_index].to('cuda:0')
+        merged_expert_state_dict=deepcopy(expert_to_merge[0].state_dict())
         
-        module_dequant = calibrated_dequant(module, layer_norm, path_config, layer_idx)
+        for k in merged_expert_state_dict.keys():
+            tensors=[expert.state_dict()[k] for expert in expert_to_merge]
+            merged_expert_state_dict[k]=sce_merge(
+                tensors,
+                merged_expert_state_dict[k],
+                select_topk=len(tensors) // 2 + 1
+            )
+            
+        merged_expert = deepcopy(expert_to_merge[0])
+        merged_expert.load_state_dict(merged_expert_state_dict)
         
-        experts_map[expert_index] = {
-            'quantized': module,
-            'dequantized': module_dequant,
-            'original_indices': [expert_index]  # Track which original experts are part of this expert
-        }
-    
-    # Keep track of current round's expert indices
-    current_round_indices = list(expert_list)
-    
-    # Keep merging until only one expert remains
-    round_num = 0
-    criterion = torch.nn.L1Loss()
-    
-    while len(current_round_indices) > 1:
-        round_num += 1
-        print(f"\nRound {round_num}: Merging {len(current_round_indices)} experts")
-        next_round_indices = []
+        for expert in expert_to_merge:
+            expert.to_empty(device='meta')
+            
+        new_experts[i] = merged_expert
         
-        # Process experts in pairs
-        i = 0
-        while i < len(current_round_indices) - 1:
-            idx1 = current_round_indices[i]
-            idx2 = current_round_indices[i+1]
-            print(f"  Merging experts {idx1} and {idx2}")
-            
-            # Get the expert data
-            expert1 = experts_map[idx1]['dequantized']
-            expert2 = experts_map[idx2]['dequantized']
-            
-            # Track which original experts are involved in this merge
-            original_indices = experts_map[idx1]['original_indices'] + experts_map[idx2]['original_indices']
-            print(f"  This merge involves original experts: {original_indices}")
-            
-            # Create a new expert with merged weights using SLERP
-            merged_expert = deepcopy(expert1)
-            # new_state_dict = expert1.state_dict()
-            
-            # for k in new_state_dict.keys():
-            #     # Equal weights (0.5) for pairwise merging
-            #     new_state_dict[k] = slerp(0.5, expert1.state_dict()[k], expert2.state_dict()[k])
-            
-            # merged_expert.load_state_dict(new_state_dict)
-            
+    distilled_mlp.experts = new_experts
+    return distilled_mlp
 
-            # Generate a new index for the merged expert
-            merged_idx = max(experts_map.keys()) + 1
-            
-            # Calibrate the merged expert against ONLY the experts involved in this merge
-            print(f"  Calibrating merged expert {merged_idx} against experts {original_indices}")
-            optimizer = AdEMAMix(
-                merged_expert.parameters(),
-                lr=8e-4
-            )
-            
-            n_epochs=min(distillation_config.n_epochs,3)
-            total_batches = (len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches) 
-            
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, 
-                T_max=total_batches*n_epochs, 
-                eta_min=8e-6
-            )
-            
-            # One epoch of calibration
-            for i in range(n_epochs):
-                progress_bar = tqdm(range(total_batches), desc=f"Calibration batches, epoch {i}")
-                for batch_idx in progress_bar:
-                    # Load hidden states
-                    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}"))
-                    hidden_states = layer_norm(hidden_states)
-                    
-                    # Forward pass through merged expert
-                    merged_output = merged_expert(hidden_states)
-                    
-                    # Forward pass through the original experts involved in this merge
-                    involved_outputs = []
-                    for orig_idx in original_indices:
-                        # Use the quantized version for forward pass
-                        orig_expert = distilled_mlp.experts[orig_idx].to('cuda:0')
-                        involved_outputs.append(orig_expert(hidden_states))
-                    
-                    # Average the outputs from the involved experts
-                    target_output = torch.mean(torch.stack(involved_outputs), dim=0)
-                    
-                    # Optimize merged expert
-                    loss = criterion(merged_output, target_output)
-                    loss.backward()
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    
-                    progress_bar.set_postfix(loss=loss.item())
-                
-            # Add the merged expert to the map
-            experts_map[merged_idx] = {
-                'quantized': None,  # We don't need the quantized version for merged experts
-                'dequantized': merged_expert,
-                'original_indices': original_indices
-            }
-            
-            # Add the new merged expert index to the next round
-            next_round_indices.append(merged_idx)
-            i += 2
+def prepare_distillat_act_cl(distilled_mlp, layer_norm, scoring_func,  distillation_config, path_config, layer_idx, device):
+    with open(os.path.join(path_config.expert_activations, f"layer_{layer_idx}.pickle"), "rb") as f:
+        (top_k_output, top_k_weight) = pickle.load(f)
         
-        # If there's an odd expert left, add it to the next round
-        if i < len(current_round_indices):
-            left_idx = current_round_indices[i]
-            print(f"  Expert {left_idx} left for next round")
-            next_round_indices.append(left_idx)
-        
-        # Update current round indices for next round
-        current_round_indices = next_round_indices
-        print(f"  Round {round_num} complete. {len(current_round_indices)} experts remaining.")
+    top_k_output=top_k_output.detach().to(torch.int64).cpu().numpy()
     
-    # Return the final expert (only one should remain)
-    assert len(current_round_indices) == 1, "Error: More than one expert remains at the end"
-    final_idx = current_round_indices[0]
-    return experts_map[final_idx]['dequantized']
+    
+    affinity_matrix = cooccurrence_matrix(top_k_output, len(np.unique(top_k_output)))
+    
+    mapping_dict, inv_mapping_dict=expert_clustering(affinity_matrix, distillation_config.target_routed_expert)
+    
+    ## Build new gate
+    distilled_mlp.gate=create_gate(
+        distilled_mlp.gate,
+        inv_mapping_dict,
+        layer_norm,
+        path_config,
+        distillation_config,
+        layer_idx,
+        scoring_func=scoring_func,
+        device=device
+    )
+
+    distilled_mlp.gate=distilled_mlp.gate.to(dtype=torch.bfloat16)
+    
+    
+    ## Dequant and merge the experts
+    new_experts=deepcopy(distilled_mlp.experts[:distillation_config.target_routed_expert])
+
+    for i, expert_list in tqdm(inv_mapping_dict.items()):
+        expert_to_merge=[]
+        for expert_index in tqdm(expert_list, leave=False):
+            module = distilled_mlp.experts[expert_index].to(device)
+            module_dequant = calibrated_dequant(module, layer_norm, path_config, layer_idx)
+            expert_to_merge.append(module_dequant)
+        
+        merged_expert_state_dict=deepcopy(expert_to_merge[0].state_dict())
+        
+        for k in merged_expert_state_dict.keys():
+            tensors=[expert.state_dict()[k] for expert in expert_to_merge]
+            merged_expert_state_dict[k]=sce_merge(
+                tensors,
+                merged_expert_state_dict[k],
+                select_topk=len(tensors) // 2 + 1
+            )
+            
+        merged_expert = deepcopy(expert_to_merge[0])
+        merged_expert.load_state_dict(merged_expert_state_dict)
+        
+        for expert in expert_to_merge:
+            expert.to_empty(device='meta')
+            
+        new_experts[i] = merged_expert
+        
+    distilled_mlp.experts = new_experts
+    return distilled_mlp
+
+def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device):
+    with open(os.path.join(path_config.expert_activations, f"layer_{layer_idx}.pickle"), "rb") as f:
+        (top_k_output, top_k_weight) = pickle.load(f)
+        
+    top_k_output=top_k_output.detach().to(torch.int64).cpu().numpy()
+    v,c=np.unique(top_k_output, return_counts=True)
+
+    expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
+    
+    gate=distilled_mlp.gate.to(device)
+    gate.train()
+    gate.config.n_routed_experts=distillation_config.target_routed_expert
+    gate.config.num_experts_per_tok=distillation_config.target_active_expert
+    gate.n_routed_experts=gate.config.n_routed_experts
+    gate.top_k=gate.config.num_experts_per_tok
+
+    
+    
+    
+    w = deepcopy(gate.weight)[:distillation_config.target_routed_expert]
+    new_experts=deepcopy(distilled_mlp.experts[:distillation_config.target_routed_expert])
+
+    expert_to_merge=[]
+    for expert_index in tqdm(expert_list, leave=False):
+        # print(expert_index)
+        module = distilled_mlp.experts[expert_index].to(device)
+        module_dequant = calibrated_dequant(module, layer_norm, path_config, layer_idx)
+        expert_to_merge.append(module_dequant)
+
+    for i, index in enumerate(expert_list):
+        new_experts[i] = expert_to_merge[i]
+        w[i]=gate.weight[index]
+        
+    gate.weight=torch.nn.Parameter(w.to(device, dtype=torch.bfloat16))
+    
+    distilled_mlp.gate=gate
+    distilled_mlp.experts =new_experts
+    return distilled_mlp

@@ -1,128 +1,82 @@
-import math
-import _pickle as pickle
-from copy import deepcopy
-from typing import Optional, Tuple, List, Union
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from fp8_linear import FP8Linear
 
-
-class AdapterBase(nn.Module):
-    """Base class for LoRA and DoRA adapters"""
-
-    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05, device="cuda:0"):
+class DORALayer(nn.Module):
+    "Same as LORA but also returnes weight norm. This will be wrapped as a single FSDP unit"
+    def __init__(self, in_features, out_features, lora_rank, device, dtype, *args, **kwargs):
         super().__init__()
-        self.base_layer = base_layer
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = alpha / rank
-        self.dropout = nn.Dropout(p=dropout)
 
-        # Get the dtype and device from the base layer
-        self.dtype = torch.bfloat16
-        self.device = device
+        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
+        lora_A_param = nn.Parameter(torch.randn(lora_rank, in_features).to(device=device, dtype=dtype)*std_dev)
+        
+        self.lora_A = nn.Linear(in_features, lora_rank, bias=False, device=device, dtype=dtype)
+        setattr(self.lora_A, "weight", lora_A_param)
+        
+        self.lora_B = nn.Linear(lora_rank, out_features, bias=False, device=device, dtype=dtype)
+        self.lora_B.weight.data.zero_()
+    
+    def forward(self, x, frozen_weight):
+        output = self.lora_B(self.lora_A(x))
+        column_norm = (frozen_weight + self.lora_B.weight @ self.lora_A.weight).norm(p=2, dim=1).detach()
+        return output, column_norm
 
-    def reset_parameters(self):
-        raise NotImplementedError
-
+class MagnitudeLayer(nn.Module):
+    def __init__(self, vector_data, device, dtype):
+        super().__init__()
+        self.magnitude = nn.Parameter(vector_data.to(device=device, dtype=dtype))
+        
     def forward(self, x):
-        raise NotImplementedError
+        return x * self.magnitude.view(1,1,-1)
 
-    def merge_and_unload(self):
-        raise NotImplementedError
-
-
-class DoRALinear(AdapterBase):
+class DoRAAdapter(nn.Module):
     def __init__(
         self,
         base_layer,
-        rank=8,
-        alpha=16,
-        dropout=0.05,
-        dora_simple=True,
-        device="cuda:0",
+        lora_rank,
+        dropout=0.1,
     ):
-        super().__init__(base_layer, rank, alpha, dropout, device)
-
-        self.weight = base_layer.weight
-        self.dora_simple = dora_simple
-
-        # Initialize LoRA matrices
-        self.lora_A = nn.Parameter(torch.empty((rank, base_layer.in_features), dtype=self.dtype, device=self.device))
-
-        self.lora_B = nn.Parameter(torch.empty((base_layer.out_features, rank), dtype=self.dtype, device=self.device))
-
-        # Initialize magnitude decomposition
-        self.weight_m = nn.Parameter(torch.empty((base_layer.out_features, 1), dtype=self.dtype, device=self.device))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B)
-
-        # Initialize magnitude component from base weights
-        with torch.no_grad():
-            base_norm = torch.linalg.norm(
-                self.base_layer.weight_dequant().to(self.device, dtype=self.dtype),
-                dim=1,
-                keepdim=True,
-            )
-            self.weight_m.data.copy_(base_norm)
-
+        super().__init__()
+        self.dtype= base_layer.weight.dtype
+        self.device=base_layer.weight.device
+        
+        self.lora_rank=lora_rank
+        self.dropout=dropout
+        
+        self.base_layer=base_layer
+        self.dora_layer=DORALayer(base_layer.in_features, base_layer.out_features, lora_rank,  device=self.device, dtype=self.dtype)
+        self.magnitude_layer=MagnitudeLayer(base_layer.weight.norm(dim=1), self.device, self.dtype)
+        
+        for params in base_layer.parameters():
+            params.requires_grad=False
+        
     def forward(self, x):
-        # Get base weight and ensure it's on the correct device
-        base_weight = self.base_layer.weight_dequant().to(self.device, dtype=self.dtype)
-
-        # Calculate new weight with LoRA
-        new_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
-
-        # Calculate norm scales
-        if self.dora_simple:
-            base_norm = torch.linalg.norm(new_weight, dim=1, keepdim=True).detach().to(dtype=self.dtype)
-        else:
-            base_norm = torch.linalg.norm(new_weight, dim=1, keepdim=True).to(dtype=self.dtype)
-
-        norm_scale = self.weight_m / base_norm
-
-        # Apply dropout
-        dropout_x = self.dropout(x)
-
-        # Compute output with decomposed scaling
-        base_out = self.base_layer(dropout_x)
-        lora_out = F.linear(dropout_x, self.lora_B @ self.lora_A) * self.scaling
-
-        result = (base_out + lora_out) * norm_scale.t()
-        if self.base_layer.bias is not None:
-            result += self.base_layer.bias.to(self.device)
-
-        return result
-
+        output=self.base_layer(x)
+        dora_output, column_norm = self.dora_layer(x, self.base_layer.weight)
+        output += dora_output
+        output = output / (column_norm + 1e-8)
+        output = self.magnitude_layer(output)
+        return output
+    
     def merge_and_unload(self):
-        """Merge DoRA weights with base weights and return new layer"""
-        new_weight = self.base_layer.weight_dequant().to(dtype=self.dtype)
-
-        new_weight = new_weight.to("cpu") + (self.lora_B.to("cpu") @ self.lora_A.to("cpu")) * self.scaling
-
-        # Apply magnitude scaling
-        base_norm = torch.linalg.norm(new_weight, dim=1, keepdim=True)
-
-        norm_scale = self.weight_m.to("cpu") / base_norm
-
-        # print(new_weight.shape, norm_scale.shape)
-        merged_weight = new_weight * norm_scale
-
-        new_layer = FP8Linear(
+        merged_layer = nn.Linear(
             self.base_layer.in_features,
             self.base_layer.out_features,
             bias=self.base_layer.bias is not None,
             device=self.device,
+            dtype=self.dtype
         )
-
-        new_layer.weight_quant = merged_weight
+        
         if self.base_layer.bias is not None:
-            new_layer.bias = nn.Parameter(self.base_layer.bias.clone().to(self.device))
+            merged_layer.bias.data.copy_(self.base_layer.bias.data)
+        
+        lora_update = self.dora_layer.lora_B.weight @ self.dora_layer.lora_A.weight
+        base_weights = self.base_layer.weight.clone()
+        
+        unnormalized_weights = base_weights + lora_update
+        
+        column_norms = unnormalized_weights.norm(p=2, dim=1, keepdim=True)
+        normalized_weights = unnormalized_weights / column_norms
 
-        return new_layer
+        final_weights = normalized_weights * self.magnitude_layer.magnitude.view(-1, 1)
+        merged_layer.weight.data.copy_(final_weights)
+        return merged_layer

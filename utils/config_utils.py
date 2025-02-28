@@ -23,6 +23,8 @@ class DistillationParams:
     max_workers: int = 16
     calibrate_merge: bool = False
     skip_first_tokens:int = 64
+    pruning_method:str ="topk", # topk , act_cl, state_cl
+    dora_rank:int =16,
 
 @dataclass
 class PathConfig:

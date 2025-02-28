@@ -13,8 +13,7 @@ import os
 
 from utils.ademamix import AdEMAMix
 from utils.config_utils import GenerationParams, PathConfig, DistillationParams
-from utils.expert_merge_utils import calibrated_merge_experts, dequantize_GEMM
-from utils.experts_merge_utils import create_gate
+from utils.experts_merge_utils import dequantize_GEMM
 from utils.torch_utils import (
     save_quant,
     load_quant,
@@ -34,7 +33,7 @@ if __name__=="__main__":
     base_model = "deepseek-ai/DeepSeek-V2-Lite"
     device="cuda:0"
     
-    target_routed_expert = 4
+    target_routed_expert = 8
     target_active_expert = 2
 
     path_config = PathConfig(
@@ -133,6 +132,7 @@ if __name__=="__main__":
     
     print('Saving')
     unhealed_name=model_name+f"_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_unhealed"
+    unhealed_name=unhealed_name.replace('_awq', '')
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     
