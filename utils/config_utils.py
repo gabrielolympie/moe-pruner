@@ -21,6 +21,8 @@ class DistillationParams:
     lora_rank: int = 16
     lora_alpha: int = 16
     max_workers: int = 16
+    calibrate_merge: bool = False
+    skip_first_tokens:int = 64
 
 @dataclass
 class PathConfig:

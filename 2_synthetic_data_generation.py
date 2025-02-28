@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from accelerate import init_empty_weights
 from tqdm.auto import tqdm
 import numpy as np
@@ -69,36 +69,23 @@ if __name__=="__main__":
 
     with open(f"{model_name}/model.safetensors.index.json", "r") as f:
         weight_map = json.load(f)["weight_map"]
+        
+    config=AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    )
 
     with init_empty_weights():
         model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            low_cpu_mem_usage=True
-        )
-
-    for name, parameter in model.named_parameters():
-        parameter.requires_grad = False
-
-
-    model.train()
-
-    destruct_module_optimized(model)
-    memory_cleanup()
-    
-    with open(f"{model_name}/model.safetensors.index.json", "r") as f:
-        weight_map = json.load(f)["weight_map"]
-
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype=torch.float16,
-            attn_implementation="flash_attention_2",
-            low_cpu_mem_usage=True
-        )
+        config,
+        trust_remote_code=True,
+        torch_dtype=torch.float16,
+        attn_implementation="flash_attention_2",
+        low_cpu_mem_usage=True
+    )
 
     for name, parameter in model.named_parameters():
         parameter.requires_grad = False

@@ -1,9 +1,11 @@
+from torch.optim.lr_scheduler import _LRScheduler
 from utils.fp8_linear import act_quant, weight_dequant
 from safetensors import safe_open
 from datasets import load_dataset
 from tqdm.auto import tqdm
 import functools
 import torch
+import math
 import gc
 
 def rsetattr(obj, attr, val):
@@ -26,7 +28,6 @@ def rhasattr(obj, attr):
 def save_quant(x, base_path):
     torch.save(x, base_path.replace(".pt", "weight.pt"))
 
-
 def load_quant(base_path):
     weight = torch.load(base_path.replace(".pt", "weight.pt"))
     return weight
@@ -37,14 +38,12 @@ def destruct_module_optimized(module: torch.nn.Module) -> torch.nn.Module:
     gc.collect()
     torch.cuda.empty_cache()
 
-
 def memory_cleanup():
     """Perform thorough memory cleanup"""
     gc.collect()
     torch.cuda.empty_cache()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-
 
 def count_parameters(model):
     frozen_params = 0
@@ -123,3 +122,20 @@ def load_weights(model, model_name, weight_map, target_modules, device):
                 memory_cleanup()
     stream.synchronize()
     return model
+
+class WarmupCosineAnnealingLR(_LRScheduler):
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=0.0):
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.min_lr = min_lr
+        super(WarmupCosineAnnealingLR, self).__init__(optimizer, last_epoch=-1)
+
+    def get_lr(self):
+        if self.last_epoch < self.warmup_steps:
+            # Linear warmup phase
+            return [base_lr * (self.last_epoch / self.warmup_steps) for base_lr in self.base_lrs]
+        else:
+            # Cosine annealing phase
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * (self.last_epoch - self.warmup_steps) / (self.total_steps - self.warmup_steps)))
+            decay_factor = (1 - self.min_lr) * cosine_decay + self.min_lr
+            return [base_lr * decay_factor for base_lr in self.base_lrs]
