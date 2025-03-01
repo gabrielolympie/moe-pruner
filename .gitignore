@@ -16,7 +16,7 @@ checkpoints
 distillation_runs
 pl_logs/
 deepseek_v3_8a4/
-runs
+*runs
 dolphin-r1/
-deepseek_v2_lite_awq/
+deepseek_*
 moe_states/

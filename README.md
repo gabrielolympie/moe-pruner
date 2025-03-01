@@ -13,113 +13,79 @@ You can also propose improvement on the git repo.
 
 The primary goal is to drastically reduce the computational and memory requirements of DeepSeek-v3 while retaining a reasonable level of performance.  This is accomplished through a multi-stage distillation and pruning process.
 
-## Methodology
+## Methodology and abloation study.
 
-The pruning pipeline consists of the following steps:
+### Core methodology:
+- 1. Create a small but high quality calibration dataset
+- 2. Use the dataset to prune experts, with several variant (see ablation below)
+- 3. Consolidate the model with pruned experts
+- 4. Post train on an instruct dataset to recover
 
-1.  **Calibration Data Download (`0. CalibrationDownload.ipynb`):** Downloads the necessary calibration dataset used for the distillation process.  This dataset is used to guide the smaller, pruned model to mimic the behavior of the larger, original model.
+### Ablation
+Figures of the ablation for deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct can be found in the img folder.
 
-2.  **Model Download and Patching (`0. ModelDownload.ipynb`):** Downloads the DeepSeek-v3 model and applies patches to the model's code. These patches are crucial for enabling efficient training and GPU utilization during the subsequent pruning steps.  This likely modifies the model's forward pass to allow for layer-by-layer processing.
+#### Method 1 : act_cl
+This method uses gate information to cluster the experts based on their co activation (i.e affinity is the number of time two experts are activated together).
+The clustering algorithm is a simple spectral clustering based on the resulting affinity matrix.
 
-3.  **Layer-wise Distillation (`1. LayerDistillation.ipynb`):** This is the core of the pruning process.  The model is loaded one layer at a time.  For each MoE layer, a smaller, "pruned" version is created with significantly fewer experts.  Knowledge distillation is then used to train the pruned layer, using the original layer as a teacher.  The pruned layer learns to mimic the output of the original layer, effectively compressing the knowledge contained within the larger set of experts.  *Note:* The current implementation uses full distillation.  LoRA (Low-Rank Adaptation) was considered but may not be effective; if testing shows LoRA is insufficient, the code will revert to full fine-tuning.
+The experts of a given cluster are then merged using the SCE method from mergekit.
 
-4.  **Expert Aggregation (`2. UnHealedAggregation.ipynb`):**  The individually distilled and pruned expert layers are consolidated into a single, self-contained PyTorch module. This step prepares the model for the subsequent healing and quantization stages.  The term "UnHealed" suggests that the gating mechanism (which selects which expert to use) is not yet optimized in this aggregated model.
+#### Method 2 : state_cl
+This method is similar to act_cl but uses a different approach to build the similarity matrix, instead of monitoring the experts activation, it computes the mean pairwise cosine similarity of two given experts outputs.
 
-5.  **Post-training (Healing) (`3. Posttraining.ipynb`):**  Fine-tunes *only* the distilled experts and the gating mechanism.  This "healing" step is crucial to recover performance lost during the aggressive pruning.  The gating mechanism learns to effectively route inputs to the reduced set of experts, and the experts themselves are further refined to improve overall model accuracy.
+#### Method 3 : tok_k
+This method is more basic and just keeps the experts that have the highest activation count on the calibration dataset.
 
-6.  **AWQ Quantization (`4. AWQQuantisation.ipynb`):** Converts the model to the AWQ (Activation-aware Weight Quantization) format.  AWQ is a quantization technique that reduces the model's memory footprint and computational cost, making it suitable for inference with tools like vLLM.  This step is essential for running the pruned model on less powerful hardware.
+#### Variant 1 : False_1
+This variant means that there was no calibration on the newly created experts after merging, so postraining is using the raw weights from the pruning
 
-## Target Sizes of This Method:
+#### Variant 2 : True_1
+This variant means that the pruned experts are calibrated for one epoch after pruning, hence some recovery is expected. Calibration is done with original weights still in AWQ format, and new experts weights in frozen bfloat16 with a Dora layer on top.
 
-This method targets the following model sizes, scaling down from a base model:
+#### Variant 3 : True_5
+This variant means that the pruned experts are calibrated for five epoch after pruning, hence lot recovery is expected, but might lead to overfitting which might affect the post training negatively. Calibration is done with original weights still in AWQ format, and new experts weights in frozen bfloat16 with a Dora layer on top.
 
-| Base Model Size      | Scaled Model Size      | Notes      |
-| :------------------- | :--------------------- | :---------- |
-| 256@8 (Base)          | DeepSeek-V3-671B@37B    | Full       |
-| 22@6                 | DeepSeek-V3-Lite-72B@31B | Large      |
-| 16@4                 | DeepSeek-V3-Lite-57B@26B | Medium     |
-| 8@2                  | DeepSeek-V3-Lite-36B@21B | Small      |
-| 4@1                  | DeepSeek-V3-Lite-26B@19B | Nano       |
+### Results of the different methods
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 16 True_5
 
-## Model Links
-### Unhealed
-v0.1 4@1: https://huggingface.co/AlphaGaO/DeepSeek-V3-4a1-unhealed-v0.1
+![Layer 16 Pruning Comparison](img/layer_16_true_5.png)
 
-## Iterations:
-v0.1:
-- Distillation : Full expert distillation, 4096 samples with seq_length 515.
-- Post training : Lora tuning (rank / alpha = 16), 65536 samples, seq_length 64 (hardware constraint).
-- Attention layers and shared experts are untouched.
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5 (with top_k beating the other methods)
 
-v0.2: (incoming)
-- Distillation : Full gate distillation, lora expert distillation, 16384 samples with seq_length 515.
+![Layer 24 Pruning Comparison](img/layer_24_true_5.png)
 
-## Improvements and Future Work (v0.2+)
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5
 
-The initial experiments have revealed several areas for improvement:
+![Layer 25 Pruning Comparison](img/layer_25_true_5.png)
 
-*   **Distillation instability when reducing number of active experts:** While running the first pipeline, it seems that reducing the number of active experts insert some training instabilities in the system. It is not clear yet why (there was a bug where the gate bias was not loaded properly) so second run will keep a high number of active experts to correct this.
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5 (with top_k beating the other methods)
 
-*   **Reconstruction Loss Gradient:**  A key observation is that the reconstruction loss (the difference between the original and pruned layer outputs) increases significantly with layer depth.  Later layers (e.g., layer 40) have much higher loss than earlier layers (e.g., layer 10).  This suggests that MoEs are particularly important for deeper layers, and a more effective pruning strategy might vary the number of experts based on layer depth.
+![Layer 26 Pruning Comparison](img/layer_26_true_5.png)
 
-*   **Calibration Dataset Size:** The current pipeline uses a relatively small calibration dataset (4096 samples) due to resource constraints.  Increasing the size of this dataset is expected to improve distillation quality.
+#### Comparison of postraining
 
-Planned experiments for v0.2 and beyond include:
 
-*   **Scaling Calibration Dataset:**  Significantly increase the size of the calibration dataset to improve the quality of the distilled, pruned model.
+### Analysis and hypothesis
+Observations on layer wise distillation:
+- On higher layers, regarding distillation loss, act_cl and state_cl outperform substantially top_k, with act_cl slightly above act_cl
+- On some specific layers, especially deeper layers, top_k outperform the two other by a wide margin, maybe hinting at a higher information density, or a possibility to improve the fusion (i'll perform a new test with both higher and lower information retention treshold in sce to wee how it fares.)
+- Whether or not the topk will  beat the other seems to depend on random_seed, with variable results.
+- As we go deeper in the network, the distillation loss seems to converge toward a higher value.
 
-*   **Adaptive Expert Count:**  Implement a variable number of experts per layer.  Earlier layers might have fewer experts, while deeper layers (where MoEs seem more critical) retain more.
+Observations on post training:
+- The True 5 variants, despite reaching a better loss than True 1, seems to mostly output correct grammar, but non sensical content.
+- The True 1 variants are much better in this regard, and seems to even exibit some reasoning capabilities,despite their small size (1b) and compression factor (1/16) wich is kinda impressive
 
-*   **Iterative Expert Pruning:**  Instead of removing all experts at once, prune them gradually in an iterative process. This might allow for better adaptation and less performance loss.
+## Contributions
+Due to hardware limitation, this repo required a few hacks to work properly. You'll find ressources for:
+- AWQ single layer loading, load a single layer in the gpu memory to avoid OOM
+- AWQ dequant and AWQ Dora merge, enabling lower memory usage thanks to 4bit quantization
+- Utilities to manage torch vram and load targeted modules inside a model (for some reasons accelerate implementation of the same stuff was not working)
+- Dora layer implementation, with adaptations for bnb and hqq (inspired by the Answer.ai repo fsdp qlora)
+- Utilities to analyse experts activations and experts similarity, implemented with numba for blazing fast execution
+- A legacy fp8_linear layer, which is a pure pytorch implementation of the Deepseek fp8 kernel, compatible with Ampere gpu inference (not sure about training).
 
-*   **Expert Fusion:** Explore fusing experts that exhibit high activation correlation or output similarity using techniques like SLERP (Spherical Linear Interpolation).  This could further reduce the number of experts without significantly impacting performance.
 
-*   **Shared Expert Training:**  Investigate sharing weights among multiple distilled MoE layers.  This could lead to more efficient distillation and potentially optimize the order of experts. This idea aims at training expert that could be reusable in several layers.
-
-## Hardware Requirements
-
-The pipeline was developed and optimized for the following configuration:
-
-*   **Storage:** 2TB SSD with at least 512MB/s read/write speed.
-*   **RAM:** 128GB DDR4 3600MHz
-*   **CPU:** AMD Ryzen 9 3950X (16 cores, 32 threads)
-*   **GPU:** 2 x NVIDIA RTX 3090 (aggregated 48GB GDDR6X VRAM)
-
-You may be able to run parts of the pipeline with less powerful hardware, particularly if you adjust parameters (e.g., reduce batch sizes, use a smaller calibration dataset).  However, the full pipeline, especially the distillation stage, is computationally demanding.
-
-## Software Requirements
-
-*   CUDA: 12.1
-*   PyTorch: 2.6 (or later compatible versions)
-*   transformers library
-*   peft library (Parameter-Efficient Fine-Tuning)
-
-**Installation (Example using Conda):**
-
-```bash
-conda create -n moe-pruner python=3.10
-conda activate moe-pruner
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-pip install transformers peft
-```
-
-## Getting Started
-
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    cd moe-pruner
-    ```
-
-2.  **Run the notebooks in order:**
-    *   `0. CalibrationDownload.ipynb`
-    *   `0. ModelDownload.ipynb`
-    *   `1. LayerDistillation.ipynb`
-    *   `2. UnHealedAggregation.ipynb`
-    *   `3. Posttraining.ipynb`
-    *   `4. AWQQuantisation.ipynb`
-
-    Make sure to adjust paths and parameters within the notebooks as needed for your environment. Each notebook should be run sequentially.
 
 ## Disclaimer
 

@@ -6,6 +6,7 @@ from tqdm.auto import tqdm
 from copy import deepcopy
 import shutil
 import numpy as np
+import argparse
 import pickle
 import torch
 import json
@@ -28,13 +29,49 @@ from utils.torch_utils import (
     count_parameters
 )
 
+
+# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
+# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
+# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
 if __name__=="__main__":
-    model_name = "deepseek_v2_lite_awq"
-    base_model = "deepseek-ai/DeepSeek-V2-Lite"
-    device="cuda:0"
+    parser = argparse.ArgumentParser(description="Two-layer distillation script.")
+    parser.add_argument("--device", type=str, default="cuda:1", help="Device to use (e.g., cuda:0, cuda:1, cpu)")
+    parser.add_argument("--model_name", type=str, default="deepseek_v2_lite_awq", help="Name of the model.")
+    parser.add_argument("--n_epochs", type=int, default=1, help="Number of epochs.")
+    parser.add_argument("--start_layer", type=int, default=1, help="Starting layer.")
+    parser.add_argument("--end_layer", type=int, default=27, help="Ending layer.")
+    parser.add_argument("--target_routed_expert", type=int, default=8, help="Target routed expert.")
+    parser.add_argument("--target_active_expert", type=int, default=2, help="Target active expert.")
+    parser.add_argument("--dora_rank", type=int, default=16, help="Target active expert.")
+    parser.add_argument("--pruning_method", type=str, default="topk", help="Target active expert.")
+    parser.add_argument("--calibrate_merge", type=int, default=1, help="Target active expert.")
     
-    target_routed_expert = 8
-    target_active_expert = 2
+    args = parser.parse_args()
+    
+    base_model = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+    
+    device = args.device
+    model_name = args.model_name
+    n_epochs = args.n_epochs
+    start_layer = args.start_layer
+    end_layer = args.end_layer
+    target_routed_expert = args.target_routed_expert
+    target_active_expert = args.target_active_expert
+    dora_rank = args.dora_rank
+    calibrate_merge= args.calibrate_merge == 1
+    pruning_method= args.pruning_method
+    
+
+    
 
     path_config = PathConfig(
         model_name = model_name,
@@ -46,13 +83,17 @@ if __name__=="__main__":
     )
 
     distillation_config = DistillationParams(
-        n_epochs= 10,
+        n_epochs= n_epochs,
         target_routed_expert = target_routed_expert,
         target_active_expert = target_active_expert,
         eval_batches=16,
-        gradient_accumulation_steps= 1,
-        learning_rate= 6e-4,
-        end_factor= 0.05,
+        gradient_accumulation_steps= 4,
+        learning_rate= 3e-4,
+        end_factor= 0.2,
+        calibrate_merge=calibrate_merge,
+        skip_first_tokens=0, ## useful to avoid tuning on early tokens that have less informations
+        pruning_method=pruning_method, # topk , act_cl, state_cl
+        dora_rank=dora_rank,
     )
     
     print('Loading model')
@@ -109,7 +150,7 @@ if __name__=="__main__":
             layer.mlp.__init__(config)
             layer.mlp.shared_experts=shared
             
-            export_path=path_config.moe_states+f"/distillat_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
+            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
             layer.mlp.load_state_dict(torch.load(export_path))
             
     print('Dequant Gemm layers')
@@ -131,7 +172,7 @@ if __name__=="__main__":
     model.config=config
     
     print('Saving')
-    unhealed_name=model_name+f"_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_unhealed"
+    unhealed_name=model_name+f"_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}_unhealed"
     unhealed_name=unhealed_name.replace('_awq', '')
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)

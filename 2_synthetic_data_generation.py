@@ -23,7 +23,7 @@ from utils.torch_utils import (
     rhasattr,
 )
 
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v2_lite_awq --n_batch 256 --batch_size 16 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 256 --batch_size 16 --max_length 512
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Synthetic Data Generation Script")
@@ -80,12 +80,12 @@ if __name__=="__main__":
 
     with init_empty_weights():
         model = AutoModelForCausalLM.from_pretrained(
-        config,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        attn_implementation="flash_attention_2",
-        low_cpu_mem_usage=True
-    )
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            attn_implementation="flash_attention_2",
+            low_cpu_mem_usage=True
+        )
 
     for name, parameter in model.named_parameters():
         parameter.requires_grad = False
@@ -120,7 +120,8 @@ if __name__=="__main__":
     destruct_module_optimized(model)
     memory_cleanup()
     
-    for layer_idx in range(len(model.model.layers)):
+    for layer_idx in range(15, len(model.model.layers)):
+        model.train()
         model.model.layers[layer_idx].to_empty(device=device)
         
         target_modules=[f".layers.{layer_idx}."]

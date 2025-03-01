@@ -33,20 +33,33 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_v2_lite_awq --start_layer 1 --end_layer 15 --target_routed_expert 16 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method act_cl --device cuda:1 --model_name deepseek_v2_lite_awq --start_layer 15 --end_layer 27 --target_routed_expert 16 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method state_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
+# python 3_layer_distillation.py --pruning_method act_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
+# python 3_layer_distillation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+
+
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device to use (e.g., cuda:0, cuda:1, cpu)")
     parser.add_argument("--model_name", type=str, default="deepseek_v2_lite_awq", help="Name of the model.")
-    parser.add_argument("--n_epochs", type=int, default=5, help="Number of epochs.")
+    parser.add_argument("--n_epochs", type=int, default=1, help="Number of epochs.")
     parser.add_argument("--start_layer", type=int, default=1, help="Starting layer.")
     parser.add_argument("--end_layer", type=int, default=27, help="Ending layer.")
     parser.add_argument("--target_routed_expert", type=int, default=8, help="Target routed expert.")
     parser.add_argument("--target_active_expert", type=int, default=2, help="Target active expert.")
     parser.add_argument("--dora_rank", type=int, default=16, help="Target active expert.")
-    parser.add_argument("--pruning_method", type=str, default="act_cl", help="Target active expert.")
+    parser.add_argument("--pruning_method", type=str, default="topk", help="Target active expert.")
+    parser.add_argument("--calibrate_merge", type=int, default=1, help="Target active expert.")
     
     args = parser.parse_args()
 
@@ -58,8 +71,10 @@ if __name__=="__main__":
     target_routed_expert = args.target_routed_expert
     target_active_expert = args.target_active_expert
     dora_rank = args.dora_rank
+    calibrate_merge= args.calibrate_merge == 1
     pruning_method= args.pruning_method
     
+    print(pruning_method)
     torch.set_float32_matmul_precision('medium')
 
     path_config = PathConfig(
@@ -73,17 +88,19 @@ if __name__=="__main__":
     
     distillation_config = DistillationParams(
         n_epochs= n_epochs,
-        target_routed_expert = 8,
-        target_active_expert = 2,
+        target_routed_expert = target_routed_expert,
+        target_active_expert = target_active_expert,
         eval_batches=16,
         gradient_accumulation_steps= 4,
         learning_rate= 3e-4,
         end_factor= 0.2,
-        calibrate_merge=False,
+        calibrate_merge=calibrate_merge,
         skip_first_tokens=0, ## useful to avoid tuning on early tokens that have less informations
         pruning_method=pruning_method, # topk , act_cl, state_cl
         dora_rank=dora_rank,
     )
+    
+    print(distillation_config.calibrate_merge)
     
     with open(f"{model_name}/model.safetensors.index.json", "r") as f:
         weight_map = json.load(f)["weight_map"]
@@ -146,107 +163,106 @@ if __name__=="__main__":
         
                 
         ## Distill
-        
-
-        writer = SummaryWriter(log_dir=path_config.distillation_logs+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}")
-
-        distillation_config.learning_rate=3e-4
-
         os.makedirs(path_config.moe_states, exist_ok=True)
-        os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}", exist_ok=True)
-        export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
+        os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}", exist_ok=True)
+        export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
+        
+        if distillation_config.calibrate_merge:
+            writer = SummaryWriter(log_dir=path_config.distillation_logs+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}")
 
-        n_epochs = distillation_config.n_epochs
+            # distillation_config.learning_rate=3e-4
 
-        optimizer = AdEMAMix(
-            distilled_mlp.parameters(),
-            lr=distillation_config.learning_rate,
-            # alpha=15
-        )
+            n_epochs = distillation_config.n_epochs
 
-        eval_batches = distillation_config.eval_batches
+            optimizer = AdEMAMix(
+                distilled_mlp.parameters(),
+                lr=distillation_config.learning_rate,
+                # alpha=15
+            )
 
-        criterion = torch.nn.functional.smooth_l1_loss
+            eval_batches = distillation_config.eval_batches
 
-        train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
+            criterion = torch.nn.functional.smooth_l1_loss
 
-        scheduler = WarmupCosineAnnealingLR(
-            optimizer,
-            warmup_steps=distillation_config.gradient_accumulation_steps * 0, ## warmup for 32 virtual steps
-            total_steps=train_batches * n_epochs ,
-            min_lr=distillation_config.learning_rate * distillation_config.end_factor
-        )
+            train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
 
-        patience = 2  # Number of epochs to wait for improvement
-        margin = 1e-4  # Minimum improvement required
-        best_loss = float('inf')
-        patience_counter = 0
+            scheduler = WarmupCosineAnnealingLR(
+                optimizer,
+                warmup_steps=distillation_config.gradient_accumulation_steps * 0, ## warmup for 32 virtual steps
+                total_steps=train_batches * n_epochs ,
+                min_lr=distillation_config.learning_rate * distillation_config.end_factor
+            )
 
-        # distilled_mlp=torch.compile(distilled_mlp)
+            patience = 2  # Number of epochs to wait for improvement
+            margin = 1e-4  # Minimum improvement required
+            best_loss = float('inf')
+            patience_counter = 0
 
-        # Training and evaluation loop
-        for epoch in range(n_epochs):
-            distilled_mlp.train()
-            progress_bar = tqdm(range(train_batches), desc=f"Calibrating merged expert, epoch {epoch}")
-            for batch_idx in progress_bar:
-                with torch.amp.autocast(device):
-                    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                    outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+            # distilled_mlp=torch.compile(distilled_mlp)
 
-                    residual = hidden_states
-                    hidden_states = layer_norm(hidden_states)
+            # Training and evaluation loop
+            for epoch in range(n_epochs):
+                distilled_mlp.train()
+                progress_bar = tqdm(range(train_batches), desc=f"Calibrating merged expert, epoch {epoch}")
+                for batch_idx in progress_bar:
+                    with torch.amp.autocast(device):
+                        hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                        outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                    pred = distilled_mlp(hidden_states)
-                    
-                    pred = pred + residual
-                    
-                    loss = criterion(pred, outputs)
-                loss.backward()
-                if (epoch * train_batches + batch_idx + 1) % distillation_config.gradient_accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                        residual = hidden_states
+                        hidden_states = layer_norm(hidden_states)
 
-                # Log the training loss
-                scheduler.step()
-                writer.add_scalar('Loss/train', loss.item(), epoch * train_batches + batch_idx)
+                        pred = distilled_mlp(hidden_states)
+                        
+                        pred = pred + residual
+                        
+                        loss = criterion(pred, outputs)
+                    loss.backward()
+                    if (epoch * train_batches + batch_idx + 1) % distillation_config.gradient_accumulation_steps == 0:
+                        optimizer.step()
+                        optimizer.zero_grad()
 
-                progress_bar.set_postfix(loss=loss.item())
+                    # Log the training loss
+                    scheduler.step()
+                    writer.add_scalar('Loss/train', loss.item(), epoch * train_batches + batch_idx)
 
-            # Evaluation phase at the end of each epoch
-            distilled_mlp.train()
-            eval_loss = 0
-            
-            with torch.no_grad():
-                for batch_idx in range(train_batches, train_batches + distillation_config.eval_batches):
-                    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                    outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                    progress_bar.set_postfix(loss=loss.item())
 
-                    residual = hidden_states
-                    hidden_states = layer_norm(hidden_states)
+                # Evaluation phase at the end of each epoch
+                distilled_mlp.train()
+                eval_loss = 0
+                
+                with torch.no_grad():
+                    for batch_idx in range(train_batches, train_batches + distillation_config.eval_batches):
+                        hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                        outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                    pred = distilled_mlp(hidden_states)
-                    
-                    pred = pred + residual
+                        residual = hidden_states
+                        hidden_states = layer_norm(hidden_states)
 
-                    
-                    loss = criterion(pred, outputs)
-                    eval_loss += loss.item()
+                        pred = distilled_mlp(hidden_states)
+                        
+                        pred = pred + residual
 
-            eval_loss /= eval_batches
-            writer.add_scalar('Loss/eval', eval_loss, epoch)
-            print(f"Epoch {epoch + 1}/{n_epochs}, Evaluation Loss: {eval_loss}")
+                        
+                        loss = criterion(pred, outputs)
+                        eval_loss += loss.item()
 
-            if best_loss - eval_loss > margin:
-                best_loss = eval_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
+                eval_loss /= eval_batches
+                writer.add_scalar('Loss/eval', eval_loss, epoch)
+                print(f"Epoch {epoch + 1}/{n_epochs}, Evaluation Loss: {eval_loss}")
 
-            if patience_counter >= patience:
-                print(f"Early stopping triggered after epoch {epoch + 1}")
-                break
+                if best_loss - eval_loss > margin:
+                    best_loss = eval_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
-        writer.close()
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered after epoch {epoch + 1}")
+                    break
+
+            writer.close()
 
         
         ## Merge adapter and save

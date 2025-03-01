@@ -345,8 +345,7 @@ def fsdp_hqq_dora_model_for_causal_lm(
 
     print('Applying dora weights to quantized layers')
     apply_dora_to_model(model, target_modules, lora_rank, lora_alpha, lora_dropout)
-    
-    
+
     print('Making sure every thing is on cpu, better twice than once')
     for name, parameter in model.named_parameters():
         rsetattr(model, name, parameter.to('cpu'))

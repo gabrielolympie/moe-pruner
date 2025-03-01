@@ -43,6 +43,7 @@ class DoRAAdapter(nn.Module):
         self.dropout=dropout
         
         self.base_layer=base_layer
+        
         self.dora_layer=DORALayer(base_layer.in_features, base_layer.out_features, lora_rank,  device=self.device, dtype=self.dtype)
         self.magnitude_layer=MagnitudeLayer(base_layer.weight.norm(dim=1), self.device, self.dtype)
         
@@ -55,7 +56,7 @@ class DoRAAdapter(nn.Module):
         output += dora_output
         output = output / (column_norm + 1e-8)
         output = self.magnitude_layer(output)
-        return output
+        return output.to(dtype=self.dtype, device=self.device)
     
     def merge_and_unload(self):
         merged_layer = nn.Linear(
