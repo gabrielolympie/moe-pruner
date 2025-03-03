@@ -455,6 +455,7 @@ def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_
 
     expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
     
+    
     gate=distilled_mlp.gate.to(device)
     gate.train()
     gate.config.n_routed_experts=distillation_config.target_routed_expert
@@ -483,72 +484,62 @@ def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_
     return distilled_mlp
 
 def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device):
-    
     for parameter in distilled_mlp.parameters():
         parameter.requires_grad=False
-    
+
     new_target_routed_expert=distilled_mlp.config.n_routed_experts//2
     new_target_active_expert=distilled_mlp.config.num_experts_per_tok
-    
+
     distilled_mlp.config.n_routed_experts=new_target_routed_expert
     distilled_mlp.config.num_experts_per_tok=new_target_active_expert
     distilled_mlp.n_routed_experts=new_target_routed_expert
     distilled_mlp.num_experts_per_tok=new_target_active_expert
-    
+
+
+
     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{0}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
     hidden_states = layer_norm(hidden_states)
-    
-    output_hidden_states=torch.stack([expert(hidden_states) for expert in distilled_mlp.experts])
-    
-    affinity_matrix=build_affinity_matrix(output_hidden_states)
-    pairs=pair_items_by_affinity(affinity_matrix)
-    
+
+    topk_idx, topk_weight, aux_loss = distilled_mlp.gate(hidden_states)
+
     gate=distilled_mlp.gate.to(device)
     gate.train()
     gate.config.n_routed_experts=new_target_routed_expert
     gate.config.num_experts_per_tok=new_target_active_expert
     gate.n_routed_experts=gate.config.n_routed_experts
     gate.top_k=gate.config.num_experts_per_tok
-    
+
     w = deepcopy(gate.weight)[:new_target_routed_expert]
     new_experts=deepcopy(distilled_mlp.experts[:new_target_routed_expert])
-    
-    for i, pair in enumerate(pairs):
-        ## Averaging gate inputs
-        w[i] = gate.weight[pair[0]]
-    
-        ## This will do something only first time, when the experts are still in awq
-        distilled_mlp.experts[pair[0]], _=dequantize_GEMM(distilled_mlp.experts[pair[0]])
-        distilled_mlp.experts[pair[1]], _=dequantize_GEMM(distilled_mlp.experts[pair[1]])
-    
-        ## Getting state dicts
-        expert_1_state_dict = distilled_mlp.experts[pair[0]].state_dict()
-        expert_2_state_dict = distilled_mlp.experts[pair[1]].state_dict()
-    
-        ## Creating new state_dict
+
+    v,c=np.unique(topk_idx.cpu().to(torch.float16), return_counts=True)
+
+    expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
+
+    for i, index in enumerate(expert_list):
+        expert_1_state_dict=distilled_mlp.experts[index].state_dict()
+        expert_2_state_dict=distilled_mlp.experts[i + len(expert_list)].state_dict()
+        
         for k in expert_1_state_dict.keys():
-            # expert_1_state_dict[k] = slerp(0.7, expert_1_state_dict[k], expert_2_state_dict[k])
-            
-            expert_1_state_dict[k] = sce_merge(
-                [expert_1_state_dict[k], expert_2_state_dict[k]],
-                expert_1_state_dict[k],
-                select_topk=1
+            expert_1_state_dict[k] = slerp(
+                0.15,
+                expert_1_state_dict[k], 
+                expert_2_state_dict[k],
             )
-    
-        new_experts[i]=deepcopy(distilled_mlp.experts[pair[0]])
+        
+        new_experts[i] = deepcopy(distilled_mlp.experts[index])
         new_experts[i].load_state_dict(expert_1_state_dict)
-    
-        ## Destroying original experts as they are not useful anymore
-        distilled_mlp.experts[pair[0]].to_empty(device='meta')
-        distilled_mlp.experts[pair[1]].to_empty(device='meta')
+        w[i]=gate.weight[index]
     
     gate.weight=torch.nn.Parameter(w.to(device, dtype=torch.bfloat16))
     distilled_mlp.gate=gate
     distilled_mlp.experts =new_experts
 
     return distilled_mlp
-
+    
+    
 def prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16):
+    # distilled_mlp, _=dequantize_GEMM(distilled_mlp)
     for name, parameter in distilled_mlp.named_parameters():
         if 'gate.' in name:
             parameter.requires_grad=True
@@ -582,7 +573,7 @@ def prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config
     scheduler = WarmupCosineAnnealingLR(
         optimizer,
         warmup_steps=distillation_config.gradient_accumulation_steps * 0, ## warmup for 32 virtual steps
-        total_steps=train_batches * distillation_config.n_epochs ,
+        total_steps=train_batches,
         min_lr=distillation_config.learning_rate * distillation_config.end_factor
     )
 
@@ -590,6 +581,7 @@ def prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config
     return distilled_mlp, optimizer, scheduler, criterion
 
 def merge_and_unload(distilled_mlp):
+    
     for name, module in tqdm(distilled_mlp.named_modules()):
         if isinstance(module, lora.Linear):
             module.merge()
