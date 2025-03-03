@@ -10,12 +10,14 @@ import torch
 import json
 import os
 
+from peft.tuners import lora
 from utils.ademamix import AdEMAMix
 from utils.config_utils import PathConfig, DistillationParams
 
 from utils.adapters import DoRAAdapter
 
 from utils.experts_merge_utils import (
+    dequantize_GEMM,
     prepare_distillat_topk,
     prepare_distillat_state_cl,
     prepare_distillat_act_cl
@@ -33,26 +35,14 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method state_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-
-# python 3_layer_distillation.py --pruning_method act_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-
-# python 3_layer_distillation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-
-
-
+# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device to use (e.g., cuda:0, cuda:1, cpu)")
     parser.add_argument("--model_name", type=str, default="deepseek_v2_lite_awq", help="Name of the model.")
-    parser.add_argument("--n_epochs", type=int, default=1, help="Number of epochs.")
+    parser.add_argument("--n_epochs", type=int, default=2, help="Number of epochs.")
     parser.add_argument("--start_layer", type=int, default=1, help="Starting layer.")
     parser.add_argument("--end_layer", type=int, default=27, help="Ending layer.")
     parser.add_argument("--target_routed_expert", type=int, default=8, help="Target routed expert.")
@@ -91,9 +81,9 @@ if __name__=="__main__":
         target_routed_expert = target_routed_expert,
         target_active_expert = target_active_expert,
         eval_batches=16,
-        gradient_accumulation_steps= 4,
-        learning_rate= 3e-4,
-        end_factor= 0.2,
+        gradient_accumulation_steps= 1,
+        learning_rate= 4e-4,
+        end_factor= 0.1,
         calibrate_merge=calibrate_merge,
         skip_first_tokens=0, ## useful to avoid tuning on early tokens that have less informations
         pruning_method=pruning_method, # topk , act_cl, state_cl
@@ -148,26 +138,37 @@ if __name__=="__main__":
             ## Method 3 keep n most asctivated experts
             distilled_mlp=prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
         
-        ## Prepare for train
-        ### Ensure that gates are not frozen
-        for name, parameter in distilled_mlp.named_parameters():
-            if 'gate.' in name:
-                parameter.requires_grad=True
-            else:
-                parameter.requires_grad=False
-
-        for name, module in tqdm(distilled_mlp.named_modules()):
-            if isinstance(module, torch.nn.Linear):
-                rsetattr(distilled_mlp, name, DoRAAdapter(module, lora_rank=distillation_config.dora_rank))
-  
-        
-                
         ## Distill
         os.makedirs(path_config.moe_states, exist_ok=True)
         os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}", exist_ok=True)
         export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
         
         if distillation_config.calibrate_merge:
+            ## Prepare for train
+            ### Ensure that gates are not frozen
+            for name, parameter in distilled_mlp.named_parameters():
+                if 'gate.' in name:
+                    parameter.requires_grad=True
+                else:
+                    parameter.requires_grad=False
+
+            # distilled_mlp, _=dequantize_GEMM(distilled_mlp)
+            for name, module in tqdm(distilled_mlp.named_modules()):
+                if isinstance(module, torch.nn.Linear):
+                    rsetattr(
+                        distilled_mlp,
+                        name,
+                        lora.Linear(
+                            module,
+                            adapter_name="adapter",
+                            r=distillation_config.dora_rank,
+                            lora_alpha=distillation_config.dora_rank,
+                            lora_dropout=0.05,
+                            use_dora=True,
+                        ).to(device=device, dtype=torch.bfloat16)
+                    )
+        
+            
             writer = SummaryWriter(log_dir=path_config.distillation_logs+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}")
 
             # distillation_config.learning_rate=3e-4
@@ -177,7 +178,8 @@ if __name__=="__main__":
             optimizer = AdEMAMix(
                 distilled_mlp.parameters(),
                 lr=distillation_config.learning_rate,
-                # alpha=15
+                betas=(0.7, 0.999, 0.9999),
+                alpha=5
             )
 
             eval_batches = distillation_config.eval_batches
@@ -268,8 +270,14 @@ if __name__=="__main__":
         ## Merge adapter and save
         
         for name, module in tqdm(distilled_mlp.named_modules()):
-            if isinstance(module, DoRAAdapter):
-                rsetattr(distilled_mlp, name, module.merge_and_unload())
+            if isinstance(module, lora.Linear):
+                module.merge()
+                
+                rsetattr(
+                    distilled_mlp,
+                    name,
+                    module.base_layer
+                )
         
         torch.save(distilled_mlp.state_dict(), export_path)
 

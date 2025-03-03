@@ -24,13 +24,27 @@ def rhasattr(obj, attr):
         return True
     except AttributeError:
         return False
+    
+def quant(x):
+    absmax = torch.max(torch.abs(x), axis=-1, keepdim=True).values
+    x = x/absmax
+    return x.to(torch.float8_e4m3fn), absmax
+
+def dequant(x, absmax):
+    return x.to(torch.bfloat16) * absmax
 
 def save_quant(x, base_path):
+    x, amax=quant(x)
+    x={
+        "weight": x,
+        "amax": amax
+    }
     torch.save(x, base_path.replace(".pt", "weight.pt"))
 
 def load_quant(base_path):
-    weight = torch.load(base_path.replace(".pt", "weight.pt"))
-    return weight
+    x = torch.load(base_path.replace(".pt", "weight.pt"))
+    x = dequant(x['weight'], x["amax"])
+    return x
 
 def destruct_module_optimized(module: torch.nn.Module) -> torch.nn.Module:
     """Efficiently destroy module and clear memory."""
@@ -89,7 +103,7 @@ def get_nonreasoning_dataset(tokenizer, generation_config):
     def filter_function(example):
         if example["overall_quality"] is not None and example["overall_quality"] == 5:
             return True
-        if example["score"] is not None and example["score"] >= 0.2:
+        if example["score"] is not None and example["score"] >= 0.16:
             return True
         return False
 

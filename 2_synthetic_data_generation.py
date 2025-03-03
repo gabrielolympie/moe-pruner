@@ -23,7 +23,13 @@ from utils.torch_utils import (
     rhasattr,
 )
 
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 256 --batch_size 16 --max_length 512
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
+
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 0 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 1 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 2 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 3 --batch_size 4 --max_length 512
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Synthetic Data Generation Script")
@@ -32,18 +38,27 @@ if __name__=="__main__":
     parser.add_argument("--n_batch", type=int, default=16, help="Number of batches")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
-
+    
+    parser.add_argument("--local_batch_size", type=int, default=512, help="Device to use")
+    parser.add_argument("--local_batch", type=int, default=512, help="Device to use")
+    
     args = parser.parse_args()
     device=args.device
     n_batch=args.n_batch
     batch_size=args.batch_size
     max_length=args.max_length
     model_name=args.model_name
+    local_batch_size=args.local_batch_size
+    local_batch=args.local_batch
     
-    dtype=torch.bfloat16
     
+    dtype=torch.float16
+    
+    torch.set_float32_matmul_precision('medium')
     torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul
     torch.backends.cudnn.allow_tf32 = True        # Allow TF32 on cudnn
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    
     
     generation_config = GenerationParams(
         n_batch=n_batch,
@@ -57,7 +72,13 @@ if __name__=="__main__":
         expert_states = "data/expert_states",
         expert_activations = "data/expert_activations",
     )
-
+    
+    local_batch_size=args.local_batch_size
+    local_batch=args.local_batch
+    
+    start = local_batch_size * local_batch
+    end = local_batch_size * ( local_batch + 1 )
+    
     position_ids = torch.arange(0, generation_config.max_length, dtype=torch.long, device=device).unsqueeze(0)
 
     tokenizer=AutoTokenizer.from_pretrained(
@@ -74,7 +95,7 @@ if __name__=="__main__":
         model_name,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
-        torch_dtype=torch.float16,
+        torch_dtype=dtype,
         low_cpu_mem_usage=True
     )
 
@@ -82,7 +103,7 @@ if __name__=="__main__":
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
             attn_implementation="flash_attention_2",
             low_cpu_mem_usage=True
         )
@@ -101,8 +122,9 @@ if __name__=="__main__":
     ]
 
     model=load_weights(model, model_name, weight_map, target_modules, device)
-
-    for batch_idx in tqdm(range(generation_config.n_batch), desc="Processing embeddings"):
+    # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
+    
+    for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
         batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
         inputs = tokenizer(
             batch,
@@ -120,20 +142,20 @@ if __name__=="__main__":
     destruct_module_optimized(model)
     memory_cleanup()
     
-    for layer_idx in range(15, len(model.model.layers)):
+    for layer_idx in range(len(model.model.layers)):
         model.train()
         model.model.layers[layer_idx].to_empty(device=device)
         
         target_modules=[f".layers.{layer_idx}."]
         
         model=load_weights(model, model_name, weight_map, target_modules, device)
-
+        # model.model.layers[layer_idx]=torch.compile(model.model.layers[layer_idx])
         if rhasattr(model.model.layers[layer_idx], "mlp.gate"):
             
             top_k_output = []
             top_k_weight = []
             
-            for batch_idx in tqdm(range(generation_config.n_batch), desc=f"Processing MLP Layer {layer_idx}"):
+            for batch_idx in tqdm(range(start, end), desc=f"Processing MLP Layer {layer_idx}"):
                 hidden_states=load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx-1}", f"batch_{batch_idx}")).to(device, dtype=dtype)
                 
 
@@ -156,7 +178,6 @@ if __name__=="__main__":
                 os.makedirs(os.path.join(path_config.expert_states, f"layer_{layer_idx}"), exist_ok=True)
                 save_quant(hidden_states.to(device, dtype=dtype), os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}"))
 
-                
                 hidden_states = model.model.layers[layer_idx].post_attention_layernorm(hidden_states)
 
                 ## For activations

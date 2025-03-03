@@ -17,9 +17,6 @@ class DistillationParams:
     gradient_accumulation_steps: int = 1
     learning_rate: float = 8e-4
     end_factor: float = 0.1
-    lora_type: str = "dora"
-    lora_rank: int = 16
-    lora_alpha: int = 16
     max_workers: int = 16
     calibrate_merge: bool = False
     skip_first_tokens:int = 64

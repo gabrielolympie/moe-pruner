@@ -16,31 +16,15 @@ from utils.ademamix import AdEMAMix
 from utils.config_utils import GenerationParams, PathConfig, DistillationParams
 from utils.experts_merge_utils import dequantize_GEMM
 from utils.torch_utils import (
-    save_quant,
-    load_quant,
     destruct_module_optimized,
     memory_cleanup,
-    get_nonreasoning_dataset,
-    load_weight,
     rsetattr,
-    rgetattr,
     load_weights,
     rhasattr,
-    count_parameters
 )
 
 
-# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 0 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-
-# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
 # python 4_unhealed_aggregation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-
-# python 4_unhealed_aggregation.py --pruning_method act_cl --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 4_unhealed_aggregation.py --pruning_method state_cl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
-# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 5 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
