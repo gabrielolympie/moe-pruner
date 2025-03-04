@@ -64,7 +64,6 @@ This variant means that the pruned experts are calibrated for five epoch after p
 
 #### Comparison of postraining
 
-
 ### Analysis and hypothesis
 Observations on layer wise distillation:
 - On higher layers, regarding distillation loss, act_cl and state_cl outperform substantially top_k, with act_cl slightly above act_cl
@@ -76,6 +75,8 @@ Observations on post training:
 - The True 5 variants, despite reaching a better loss than True 1, seems to mostly output correct grammar, but non sensical content.
 - The True 1 variants are much better in this regard, and seems to even exibit some reasoning capabilities,despite their small size (1b) and compression factor (1/16) wich is kinda impressive
 
+
+
 ## Contributions
 Due to hardware limitation, this repo required a few hacks to work properly. You'll find ressources for:
 - AWQ single layer loading, load a single layer in the gpu memory to avoid OOM
@@ -84,7 +85,7 @@ Due to hardware limitation, this repo required a few hacks to work properly. You
 - Dora layer implementation, with adaptations for bnb and hqq (inspired by the Answer.ai repo fsdp qlora)
 - Utilities to analyse experts activations and experts similarity, implemented with numba for blazing fast execution
 - A legacy fp8_linear layer, which is a pure pytorch implementation of the Deepseek fp8 kernel, compatible with Ampere gpu inference (not sure about training).
-
+- Progressive expert merging, a new method that is using  sce merging to progressively merge the experts based on the similarity of their output, achieving a good knowledge preservation of the experts.
 
 
 ## Disclaimer

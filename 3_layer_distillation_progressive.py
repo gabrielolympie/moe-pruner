@@ -17,10 +17,14 @@ from utils.config_utils import PathConfig, DistillationParams
 from utils.adapters import DoRAAdapter
 
 from utils.experts_merge_utils import (
-    halve_distilled_mlp,
-    calibrated_dequant,
+    dequantize_GEMM,
+    prepare_distillat_topk,
+    prepare_distillat_state_cl,
+    prepare_distillat_act_cl,
     prepare_moe_for_distillation,
-    merge_and_unload
+    halve_distilled_mlp,
+    merge_and_unload,
+    calibrated_dequant,
 )
 
 from utils.torch_utils import (
@@ -35,8 +39,8 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_progressive.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 6
-# python 3_layer_distillation_progressive.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 6
+# python 3_layer_distillation_progressive.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 3  --target_routed_expert 8 --target_active_expert 6
+# python 3_layer_distillation_progressive.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 3  --target_routed_expert 8 --target_active_expert 6
 
 
 if __name__=="__main__":
@@ -114,6 +118,7 @@ if __name__=="__main__":
     
     # layer_idx=23
     for layer_idx in range(start_layer, end_layer):
+        
         model.model.layers[layer_idx].to_empty(device=device)
         target_modules=[f".layers.{layer_idx}."]
         model=load_weights(model, model_name, weight_map, target_modules, device)
@@ -121,10 +126,8 @@ if __name__=="__main__":
         distilled_mlp=deepcopy(model.model.layers[layer_idx].mlp).to(device)
         layer_norm=deepcopy(model.model.layers[layer_idx].post_attention_layernorm).to(device, dtype=torch.bfloat16)
 
-        distilled_mlp.config.n_routed_experts=distillation_config.target_routed_expert
-        distilled_mlp.config.num_experts_per_tok=distillation_config.target_active_expert
-        distilled_mlp.n_routed_experts=distillation_config.target_routed_expert
-        distilled_mlp.num_experts_per_tok=distillation_config.target_active_expert
+        distilled_mlp=deepcopy(model.model.layers[layer_idx].mlp).to(device)
+        layer_norm=deepcopy(model.model.layers[layer_idx].post_attention_layernorm).to(device, dtype=torch.bfloat16)
 
         for i in range(len(distilled_mlp.experts)):
             distilled_mlp.experts[i] = calibrated_dequant(distilled_mlp.experts[i] , layer_norm, path_config, layer_idx)
@@ -133,135 +136,123 @@ if __name__=="__main__":
 
         destruct_module_optimized(model)
         memory_cleanup()
-
-        distilled_mlp=halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
-                
-        ## Distill
-        os.makedirs(path_config.moe_states, exist_ok=True)
-        os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}", exist_ok=True)
-        export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
         
-        if distillation_config.calibrate_merge:
-            ## Prepare for train
-            
-            writer = SummaryWriter(log_dir=path_config.distillation_logs+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}")
+        distilled_mlp=halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
+  
+        ## Distill
+        writer = SummaryWriter(log_dir=path_config.distillation_logs+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}")
 
-            os.makedirs(path_config.moe_states, exist_ok=True)
-            os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}", exist_ok=True)
-            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
+        os.makedirs(path_config.moe_states, exist_ok=True)
 
-            # distillation_config.learning_rate=5e-4
-            # distillation_config.end_factor=0.9
-            # distillation_config.gradient_accumulation_steps=1
+        distillation_config.n_epochs=1
+        distillation_config.learning_rate=3e-4
+        distillation_config.end_factor=0.4
+        distillation_config.gradient_accumulation_steps=1
 
-            distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
-            train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
+        distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
+        train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
 
-            halve_every = 64
+        halve_every = 128
 
-            eval_batches = distillation_config.eval_batches
+        eval_batches = distillation_config.eval_batches
 
-            patience = 2  # Number of epochs to wait for improvement
-            margin = 1e-4  # Minimum improvement required
-            best_loss = float('inf')
-            patience_counter = 0
+        patience = 2  # Number of epochs to wait for improvement
+        margin = 1e-4  # Minimum improvement required
+        best_loss = float('inf')
+        patience_counter = 0
 
-            # Training and evaluation loop
-            for epoch in range(distillation_config.n_epochs):
-                if len(distilled_mlp.experts) > distillation_config.target_routed_expert:
-                    ## If too many total expert, reduce number of expert
-                    print('halving')
-                    distilled_mlp=merge_and_unload(distilled_mlp)
+        # Training and evaluation loop
+        for epoch in range(distillation_config.n_epochs):
+            distilled_mlp.train()
+            progress_bar = tqdm(range(train_batches), desc=f"Calibrating merged expert, epoch {epoch}")
+            for batch_idx in progress_bar:
+                if (epoch * train_batches + batch_idx + 1) % halve_every == 0:
+                    if len(distilled_mlp.experts) > distillation_config.target_routed_expert:
+                        print('halving')
+                        distilled_mlp=merge_and_unload(distilled_mlp)
+                
+                        if epoch > 0:
+                            os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}", exist_ok=True)
+                            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}/layer_{layer_idx}"
+                            torch.save(distilled_mlp.state_dict(), export_path)
+                        
+                        distilled_mlp=halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
+                        distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
+                    else:
+                        ## Else reduce number of active expert
+                        if distilled_mlp.config.num_experts_per_tok != distillation_config.target_active_expert:
+                            print('updating active')
+                            distilled_mlp.config.num_experts_per_tok=distillation_config.target_active_expert
+                            distilled_mlp.num_experts_per_tok=distillation_config.target_active_expert
+                            
+                            distilled_mlp.gate.config.num_experts_per_tok=distillation_config.target_active_expert
+                            distilled_mlp.gate.top_k=distillation_config.target_active_expert
+                with torch.amp.autocast(device):
+                    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                    outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                    if epoch > 0:
-                        os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}", exist_ok=True)
-                        export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}/layer_{layer_idx}"
-                        torch.save(distilled_mlp.state_dict(), export_path)
+                    residual = hidden_states
+                    hidden_states = layer_norm(hidden_states)
+
+                    pred = distilled_mlp(hidden_states)
                     
-                    distilled_mlp=halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
-                    distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
-                else:
-                    ## Else reduce number of active expert
-                    if distilled_mlp.config.num_experts_per_tok != distillation_config.target_active_expert:
-                        print('updating active')
-                        distilled_mlp.config.num_experts_per_tok=distillation_config.target_active_expert
-                        distilled_mlp.num_experts_per_tok=distillation_config.target_active_expert
-                        
-                        distilled_mlp.gate.config.num_experts_per_tok=distillation_config.target_active_expert
-                        distilled_mlp.gate.top_k=distillation_config.target_active_expert
-                
-                distilled_mlp.train()
-                progress_bar = tqdm(range(train_batches), desc=f"Calibrating merged expert, epoch {epoch}")
-                for batch_idx in progress_bar:
-                    # if (epoch * train_batches + batch_idx + 1) % halve_every == 0:
-                    with torch.amp.autocast(device):
-                        hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                        outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                    pred = pred + residual
+                    loss = criterion(pred, outputs)
+                    
+                loss.backward()
+                if (epoch * train_batches + batch_idx + 1) % distillation_config.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-                        residual = hidden_states
-                        hidden_states = layer_norm(hidden_states)
+                # Log the training loss
+                scheduler.step()
+                writer.add_scalar('Loss/train', loss.item(), epoch * train_batches + batch_idx)
 
-                        pred = distilled_mlp(hidden_states)
-                        
-                        pred = pred + residual
-                        loss = criterion(pred, outputs)
-                        
-                    loss.backward()
-                    if (epoch * train_batches + batch_idx + 1) % distillation_config.gradient_accumulation_steps == 0:
-                        optimizer.step()
-                        optimizer.zero_grad()
+                progress_bar.set_postfix(loss=loss.item())
 
-                    # Log the training loss
-                    scheduler.step()
-                    writer.add_scalar('Loss/train', loss.item(), epoch * train_batches + batch_idx)
+            # Evaluation phase at the end of each epoch
+            distilled_mlp.train()
+            eval_loss = 0
+            
+            with torch.no_grad():
+                for batch_idx in range(train_batches, train_batches + distillation_config.eval_batches):
+                    hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                    outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                    progress_bar.set_postfix(loss=loss.item())
+                    residual = hidden_states
+                    hidden_states = layer_norm(hidden_states)
 
-                # Evaluation phase at the end of each epoch
-                distilled_mlp.train()
-                eval_loss = 0
-                
-                with torch.no_grad():
-                    for batch_idx in range(train_batches, train_batches + distillation_config.eval_batches):
-                        hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                        outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                    pred = distilled_mlp(hidden_states)
+                    
+                    pred = pred + residual
 
-                        residual = hidden_states
-                        hidden_states = layer_norm(hidden_states)
+                    loss = criterion(pred, outputs)
+                    eval_loss += loss.item()
 
-                        pred = distilled_mlp(hidden_states)
-                        
-                        pred = pred + residual
+            eval_loss /= eval_batches
+            writer.add_scalar('Loss/eval', eval_loss, epoch)
+            print(f"Epoch {epoch + 1}/{distillation_config.n_epochs}, Evaluation Loss: {eval_loss}")
 
-                        loss = criterion(pred, outputs)
-                        eval_loss += loss.item()
+            if best_loss - eval_loss > margin:
+                best_loss = eval_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
 
-                eval_loss /= eval_batches
-                writer.add_scalar('Loss/eval', eval_loss, epoch)
-                print(f"Epoch {epoch + 1}/{distillation_config.n_epochs}, Evaluation Loss: {eval_loss}")
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after epoch {epoch + 1}")
+                break
 
-                if best_loss - eval_loss > margin:
-                    best_loss = eval_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= patience:
-                    print(f"Early stopping triggered after epoch {epoch + 1}")
-                    break
-
-            writer.close()
+        writer.close()
 
 
         
         ## Merge adapter and save
-        print('halving')
         distilled_mlp=merge_and_unload(distilled_mlp)
 
-        if epoch > 0:
-            os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}", exist_ok=True)
-            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}/layer_{layer_idx}"
-            torch.save(distilled_mlp.state_dict(), export_path)
+        os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}", exist_ok=True)
+        export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
+        torch.save(distilled_mlp.state_dict(), export_path)
 
                 
         

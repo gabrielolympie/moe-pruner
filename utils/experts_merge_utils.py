@@ -11,10 +11,16 @@ import numpy as np
 import numba as nb
 
 import torch
+import time
 
 from awq.modules.linear.gemm import WQLinear_GEMM
 from awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
-from mergekit.merge_methods.sce import sce_merge
+from mergekit.merge_methods.sce import sce_weight, sce_mask
+from mergekit.merge_methods.easy_define import merge_method
+from mergekit.merge_methods.generalized_task_arithmetic import (
+    get_mask as sign_consensus_mask,
+)
+
 from mergekit.merge_methods.multislerp import multislerp
 from mergekit.merge_methods.slerp import slerp
 
@@ -420,11 +426,11 @@ def prepare_distillat_act_cl(distilled_mlp, layer_norm, scoring_func,  distillat
         for k in merged_expert_state_dict.keys():
             tensors=[expert.state_dict()[k] for expert in expert_to_merge]
             
-            merged_expert_state_dict[k]=sce_merge(
+            merged_expert_state_dict[k]=torch.squeeze(sce_merge(
                 tensors,
                 merged_expert_state_dict[k],
-                select_topk=len(tensors) // 2 + 1
-            )
+                select_topk=0.3
+            ))
             
             # merged_expert_state_dict[k]=multislerp(
             #     tensors,
@@ -432,9 +438,7 @@ def prepare_distillat_act_cl(distilled_mlp, layer_norm, scoring_func,  distillat
             #     base_tensor=merged_expert_state_dict[k],
             # )
             
-            
-            
-            
+
         merged_expert = deepcopy(expert_to_merge[0])
         merged_expert.load_state_dict(merged_expert_state_dict)
         
@@ -483,6 +487,38 @@ def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_
     distilled_mlp.experts =new_experts
     return distilled_mlp
 
+def sce_merge(
+    tensors: List[torch.Tensor],
+    base_tensor: torch.Tensor,
+    int8_mask: bool = False,
+    select_topk: float = 1.0,
+) -> torch.Tensor:
+    if not tensors:
+        return base_tensor
+    mask_dtype = torch.int8 if int8_mask else base_tensor.dtype
+    task_vectors = torch.stack([t - base_tensor for t in tensors], dim=0)
+
+    if select_topk < 1:
+        mask = sce_mask(task_vectors, select_topk, mask_dtype)
+        
+        if len(mask.shape) != task_vectors.shape: ## Correction should happend only when relevant, else it will bug the whole stuff
+            mask = mask.unsqueeze(0)
+            
+        task_vectors = task_vectors * mask
+
+    erase_mask = sign_consensus_mask(task_vectors, method="sum", mask_dtype=mask_dtype)
+
+    tv_weights = sce_weight(task_vectors)
+    
+    while tv_weights.dim() < task_vectors.dim():
+        tv_weights = tv_weights.unsqueeze(-1)
+
+    erased_weights = tv_weights * erase_mask
+    merged_tv = (task_vectors * erased_weights).sum(dim=0)
+    
+    final_tv = merged_tv / torch.sum(erased_weights, dim=0).clamp(min=1e-6)
+    return base_tensor + final_tv
+
 def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device):
     for parameter in distilled_mlp.parameters():
         parameter.requires_grad=False
@@ -494,8 +530,6 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
     distilled_mlp.config.num_experts_per_tok=new_target_active_expert
     distilled_mlp.n_routed_experts=new_target_routed_expert
     distilled_mlp.num_experts_per_tok=new_target_active_expert
-
-
 
     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{0}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
     hidden_states = layer_norm(hidden_states)
@@ -511,26 +545,49 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
 
     w = deepcopy(gate.weight)[:new_target_routed_expert]
     new_experts=deepcopy(distilled_mlp.experts[:new_target_routed_expert])
-
-    v,c=np.unique(topk_idx.cpu().to(torch.float16), return_counts=True)
-
-    expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
-
-    for i, index in enumerate(expert_list):
-        expert_1_state_dict=distilled_mlp.experts[index].state_dict()
-        expert_2_state_dict=distilled_mlp.experts[i + len(expert_list)].state_dict()
-        
-        for k in expert_1_state_dict.keys():
-            expert_1_state_dict[k] = slerp(
-                0.15,
-                expert_1_state_dict[k], 
-                expert_2_state_dict[k],
-            )
-        
-        new_experts[i] = deepcopy(distilled_mlp.experts[index])
-        new_experts[i].load_state_dict(expert_1_state_dict)
-        w[i]=gate.weight[index]
+    topk_idx=topk_idx.detach().to(torch.int64).cpu().numpy()
     
+    # v,c=np.unique(topk_idx, return_counts=True)
+    # expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
+    
+    # for i, index in enumerate(expert_list):
+    #     expert_1_state_dict=distilled_mlp.experts[index].state_dict()
+    #     expert_2_state_dict=distilled_mlp.experts[i + len(expert_list)].state_dict()
+        
+    #     for k in expert_1_state_dict.keys():
+    #         # expert_1_state_dict[k] = slerp(
+    #         #     0.15,
+    #         #     expert_1_state_dict[k], 
+    #         #     expert_2_state_dict[k],
+    #         # )
+    #         expert_1_state_dict[k]=sce_merge(
+    #             [expert_1_state_dict[k], expert_2_state_dict[k]],
+    #             expert_1_state_dict[k],
+    #             select_topk=0.5
+    #         )
+        
+    #     new_experts[i] = deepcopy(distilled_mlp.experts[index])
+    #     new_experts[i].load_state_dict(expert_1_state_dict)
+    #     w[i]= gate.weight[index]
+    
+    # affinity_matrix=cooccurrence_matrix(topk_idx, len(np.unique(topk_idx)))
+    affinity_matrix=build_affinity_matrix(hidden_states)
+    affinity_matrix=(affinity_matrix - affinity_matrix.min())/(affinity_matrix.max()-affinity_matrix.min())
+    pairs=pair_items_by_affinity(affinity_matrix)
+    
+    for i, pair in enumerate(pairs):
+        expert_1_state_dict=distilled_mlp.experts[pair[0]].state_dict()
+        expert_2_state_dict=distilled_mlp.experts[pair[1]].state_dict()
+        for k in expert_1_state_dict.keys():
+            expert_1_state_dict[k]=sce_merge(
+                [expert_1_state_dict[k], expert_2_state_dict[k]],
+                expert_1_state_dict[k],
+                select_topk=0.25
+            )
+            new_experts[i] = deepcopy(distilled_mlp.experts[pair[0]])
+            new_experts[i].load_state_dict(expert_1_state_dict)
+            w[i]= gate.weight[pair[0]]
+        
     gate.weight=torch.nn.Parameter(w.to(device, dtype=torch.bfloat16))
     distilled_mlp.gate=gate
     distilled_mlp.experts =new_experts
