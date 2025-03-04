@@ -92,6 +92,15 @@ Due to hardware limitation, this repo required a few hacks to work properly. You
 
 This project is experimental and under active development.  The provided code and methodology are subject to change.  There is no guarantee of performance or stability.  Use at your own discretion.
 
+## Acknowledgements
+Special thanks to several projects that inspired and helped the construction of this:
+- [CognitiveComputations](https://huggingface.co/cognitivecomputations) for their work on the very high quality dolphin-r1 dataset
+- [FuseChat](https://github.com/fanqiwan/FuseAI/tree/main/FuseChat) for their work on knowledge fusion
+- [DeepSeek](https://github.com/deepseek-ai) for their openess and awesome technical work
+- [AnswerAI](https://github.com/AnswerDotAI/fsdp_qlora) for their work on fsdp qlora, even if i did not use it in the end
+- [HuggingFace](https://huggingface.co/) and [PyTorch](https://pytorch.org/) for creating the ecosystem and tools that enabled to iterate very quickly.
+- [OpenAi](https://openai.com/) for teaching me the value of open source AI by giving the example of what you shouldn't do.
+
 ## Contributing
 
 Contributions are welcome!  If you have suggestions for improvements, bug fixes, or new features, please open an issue or submit a pull request.
