@@ -1,7 +1,7 @@
 
 from utils.experts_merge_utils import group_items_by_affinity, dequantize_GEMM
-from utils.ademamix import AdEMAMix
 
+from utils.ademamix import AdEMAMix
 from utils.patched_sce import sce_merge
 from mergekit.merge_methods.multislerp import multislerp
 
@@ -249,11 +249,11 @@ class MultiplexedMOE(torch.nn.Module):
         y = torch.sum(torch.stack([self.experts[index](hidden_states) for index in indexes], dim=-1) * flat_topk_weight[:, None], dim=-1)
         return y
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        inv_mapping_tensor = state_dict.pop(prefix + 'inv_mapping_dict', None)
-        if inv_mapping_tensor is not None:
-            inv_mapping_dict = {int(key): val.tolist() for key, val in inv_mapping_tensor}
-            self.register_buffer('inv_mapping_dict', inv_mapping_tensor, persistent=False)
-        else:
-            error_msgs.append(f"Missing key '{prefix}inv_mapping_dict' in state_dict")
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+    # def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    #     inv_mapping_tensor = state_dict.pop(prefix + 'inv_mapping_dict', None)
+    #     if inv_mapping_tensor is not None:
+    #         inv_mapping_dict = {int(key): val.tolist() for key, val in inv_mapping_tensor}
+    #         self.register_buffer('inv_mapping_dict', inv_mapping_tensor, persistent=False)
+    #     else:
+    #         error_msgs.append(f"Missing key '{prefix}inv_mapping_dict' in state_dict")
+    #     super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
