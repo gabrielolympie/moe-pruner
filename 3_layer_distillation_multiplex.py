@@ -46,7 +46,9 @@ import pickle
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_progressive.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 2 --target_routed_expert 16 --target_active_expert 4
+# python 3_layer_distillation_multiplex.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 1 --target_routed_expert 16 --target_active_expert 6
+# python 3_layer_distillation_multiplex.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 1 --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation_multiplex.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 1 --target_routed_expert 4 --target_active_expert 4
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
