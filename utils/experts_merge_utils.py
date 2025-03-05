@@ -13,14 +13,12 @@ import numba as nb
 import torch
 import time
 
+from schedulefree import AdamWScheduleFree
 from awq.modules.linear.gemm import WQLinear_GEMM
 from awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
-from mergekit.merge_methods.sce import sce_weight, sce_mask
-from mergekit.merge_methods.easy_define import merge_method
-from mergekit.merge_methods.generalized_task_arithmetic import (
-    get_mask as sign_consensus_mask,
-)
 
+
+from utils.patched_sce import sce_merge
 from mergekit.merge_methods.multislerp import multislerp
 from mergekit.merge_methods.slerp import slerp
 
@@ -113,7 +111,7 @@ def calibrated_dequant(module, layer_norm, path_config, layer_idx):
     #     progress_bar.set_postfix(loss=loss.item())
     return module_dequant
 
-def dequantize_GEMM(model, destruct=True, dtype=torch.bfloat16):
+def dequantize_GEMM(model, destruct=True, dtype=torch.bfloat16, return_params=True):
     new_model=deepcopy(model)
     params=[]
     for name, module in new_model.named_modules():
@@ -126,7 +124,10 @@ def dequantize_GEMM(model, destruct=True, dtype=torch.bfloat16):
         model.to_empty(device='meta')
         del model
     new_model=new_model.to(dtype=dtype)
-    return new_model, params
+    if return_params:
+        return new_model, params
+    else:
+        return new_model
         
 def dequantize_WQLinear_GEMM(wq_linear, destruct=True, dtype=torch.bfloat16):
     
@@ -195,6 +196,75 @@ def pair_items_by_affinity(affinity_matrix):
         affinities[j, :] = -np.inf
         affinities[:, j] = -np.inf
     return pairs
+
+def group_items_by_affinity(affinity_matrix, group_size):
+    """
+    Group items based on their affinity scores into groups of specified size.
+    
+    Parameters:
+    affinity_matrix: numpy array of shape (n, n) containing affinity scores
+    group_size: int, the desired size of each group
+    
+    Returns:
+    list of tuples, where each tuple contains the indices of items in a group
+    """
+    if group_size < 2:
+        raise ValueError("Group size must be at least 2")
+        
+    affinities = affinity_matrix.copy()
+    np.fill_diagonal(affinities, -np.inf)
+    groups = []
+    remaining_items = set(range(affinities.shape[0]))
+    
+    while len(remaining_items) >= group_size:
+        # Initialize new group
+        current_group = []
+        group_candidates = remaining_items.copy()
+        
+        # Fill the group
+        while len(current_group) < group_size and group_candidates:
+            if len(current_group) == 0:
+                # For the first item in the group, use the highest overall affinity
+                mask = np.ones_like(affinities, dtype=bool)
+                for i in range(affinities.shape[0]):
+                    if i not in group_candidates:
+                        mask[i, :] = False
+                        mask[:, i] = False
+                masked_affinities = np.where(mask, affinities, -np.inf)
+                flat_idx = np.argmax(masked_affinities)
+                i, _ = np.unravel_index(flat_idx, affinities.shape)
+                current_group.append(i)
+                group_candidates.remove(i)
+            else:
+                # For subsequent items, find the item with highest average affinity to current group
+                best_score = -np.inf
+                best_item = None
+                
+                for candidate in group_candidates:
+                    # Calculate average affinity with current group members
+                    score = np.mean([affinities[candidate, member] for member in current_group])
+                    if score > best_score:
+                        best_score = score
+                        best_item = candidate
+                
+                current_group.append(best_item)
+                group_candidates.remove(best_item)
+        
+        # Add the completed group to groups list
+        groups.append(tuple(sorted(current_group)))
+        
+        # Remove grouped items from remaining_items
+        for item in current_group:
+            remaining_items.remove(item)
+            # Set affinities for used items to -inf
+            affinities[item, :] = -np.inf
+            affinities[:, item] = -np.inf
+    
+    # Handle remaining items if any (less than group_size)
+    if remaining_items:
+        groups.append(tuple(sorted(remaining_items)))
+    
+    return groups
 
 def expert_clustering(affinity_matrix, target_routed_expert):
     clustering = SpectralClustering(
@@ -371,7 +441,7 @@ def prepare_distillat_state_cl(distilled_mlp, layer_norm, scoring_func, distilla
             merged_expert_state_dict[k]=sce_merge(
                 tensors,
                 merged_expert_state_dict[k],
-                select_topk=len(tensors) // 2 + 1
+                select_topk=0.3
             )
             
         merged_expert = deepcopy(expert_to_merge[0])
@@ -487,37 +557,7 @@ def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_
     distilled_mlp.experts =new_experts
     return distilled_mlp
 
-def sce_merge(
-    tensors: List[torch.Tensor],
-    base_tensor: torch.Tensor,
-    int8_mask: bool = False,
-    select_topk: float = 1.0,
-) -> torch.Tensor:
-    if not tensors:
-        return base_tensor
-    mask_dtype = torch.int8 if int8_mask else base_tensor.dtype
-    task_vectors = torch.stack([t - base_tensor for t in tensors], dim=0)
 
-    if select_topk < 1:
-        mask = sce_mask(task_vectors, select_topk, mask_dtype)
-        
-        if len(mask.shape) != task_vectors.shape: ## Correction should happend only when relevant, else it will bug the whole stuff
-            mask = mask.unsqueeze(0)
-            
-        task_vectors = task_vectors * mask
-
-    erase_mask = sign_consensus_mask(task_vectors, method="sum", mask_dtype=mask_dtype)
-
-    tv_weights = sce_weight(task_vectors)
-    
-    while tv_weights.dim() < task_vectors.dim():
-        tv_weights = tv_weights.unsqueeze(-1)
-
-    erased_weights = tv_weights * erase_mask
-    merged_tv = (task_vectors * erased_weights).sum(dim=0)
-    
-    final_tv = merged_tv / torch.sum(erased_weights, dim=0).clamp(min=1e-6)
-    return base_tensor + final_tv
 
 def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device):
     for parameter in distilled_mlp.parameters():
@@ -533,9 +573,11 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
 
     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{0}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
     hidden_states = layer_norm(hidden_states)
-
+    
     topk_idx, topk_weight, aux_loss = distilled_mlp.gate(hidden_states)
 
+    hidden_states = torch.stack([expert.act_fn(expert.gate_proj(hidden_states)) for expert in distilled_mlp.experts])
+    
     gate=distilled_mlp.gate.to(device)
     gate.train()
     gate.config.n_routed_experts=new_target_routed_expert
@@ -544,10 +586,11 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
     gate.top_k=gate.config.num_experts_per_tok
 
     w = deepcopy(gate.weight)[:new_target_routed_expert]
+    
     new_experts=deepcopy(distilled_mlp.experts[:new_target_routed_expert])
     topk_idx=topk_idx.detach().to(torch.int64).cpu().numpy()
     
-    # v,c=np.unique(topk_idx, return_counts=True)
+    v,c=np.unique(topk_idx, return_counts=True)
     # expert_list=np.argsort(c)[-distillation_config.target_routed_expert:]
     
     # for i, index in enumerate(expert_list):
@@ -563,7 +606,7 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
     #         expert_1_state_dict[k]=sce_merge(
     #             [expert_1_state_dict[k], expert_2_state_dict[k]],
     #             expert_1_state_dict[k],
-    #             select_topk=0.5
+    #             select_topk=0.2
     #         )
         
     #     new_experts[i] = deepcopy(distilled_mlp.experts[index])
@@ -572,21 +615,72 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
     
     # affinity_matrix=cooccurrence_matrix(topk_idx, len(np.unique(topk_idx)))
     affinity_matrix=build_affinity_matrix(hidden_states)
+    print(affinity_matrix.shape)
     affinity_matrix=(affinity_matrix - affinity_matrix.min())/(affinity_matrix.max()-affinity_matrix.min())
     pairs=pair_items_by_affinity(affinity_matrix)
     
     for i, pair in enumerate(pairs):
-        expert_1_state_dict=distilled_mlp.experts[pair[0]].state_dict()
-        expert_2_state_dict=distilled_mlp.experts[pair[1]].state_dict()
-        for k in expert_1_state_dict.keys():
-            expert_1_state_dict[k]=sce_merge(
-                [expert_1_state_dict[k], expert_2_state_dict[k]],
-                expert_1_state_dict[k],
-                select_topk=0.25
-            )
-            new_experts[i] = deepcopy(distilled_mlp.experts[pair[0]])
-            new_experts[i].load_state_dict(expert_1_state_dict)
-            w[i]= gate.weight[pair[0]]
+        try:
+            if c[pair[0]] >= c[pair[1]]:
+                ref=pair[0]
+                aux=pair[1]
+            else:
+                ref=pair[1]
+                aux=pair[0]
+        except:
+            ref=pair[0]
+            aux=pair[1]
+            
+        expert_1_state_dict=distilled_mlp.experts[ref].state_dict()
+        expert_2_state_dict=distilled_mlp.experts[aux].state_dict()
+        
+        k1 = "gate_proj.weight"
+        k2 = "up_proj.weight"
+        k3 = "down_proj.weight"
+        
+        # expert_1_state_dict[k1]=sce_merge(
+        #     [expert_1_state_dict[k1], expert_2_state_dict[k1]],
+        #     expert_1_state_dict[k1],
+        #     select_topk=0.1
+        # )
+        
+        # expert_1_state_dict[k2]=sce_merge(
+        #     [expert_1_state_dict[k2], expert_2_state_dict[k2]],
+        #     expert_1_state_dict[k2],
+        #     select_topk=0.1
+        # )
+                
+        # expert_1_state_dict[k3]=sce_merge(
+        #     [expert_1_state_dict[k3], expert_2_state_dict[k3]],
+        #     expert_1_state_dict[k3],
+        #     select_topk=0.1
+        # )
+        
+        expert_1_state_dict[k1] = 0.5 * expert_1_state_dict[k1] + 0.5 * expert_2_state_dict[k1]
+        expert_1_state_dict[k2] = 0.5 * expert_1_state_dict[k2] + 0.5 * expert_2_state_dict[k2]
+        expert_1_state_dict[k3] = 0.5 * expert_1_state_dict[k3] + 0.5 * expert_2_state_dict[k3]
+        
+        # expert_1_state_dict[k1]=slerp(
+        #     0.1,
+        #     expert_1_state_dict[k1],
+        #     expert_2_state_dict[k1],
+        # )
+        
+        # expert_1_state_dict[k2]=slerp(
+        #     0.1,
+        #     expert_1_state_dict[k2],
+        #     expert_2_state_dict[k2],
+        # )
+        
+        # expert_1_state_dict[k3]=slerp(
+        #     0.5,
+        #     expert_1_state_dict[k3],
+        #     expert_2_state_dict[k3],
+        # )
+        
+        new_experts[i] = deepcopy(distilled_mlp.experts[pair[0]])
+        new_experts[i].load_state_dict(expert_1_state_dict)
+        w[i]= (gate.weight[ref] + gate.weight[pair[1]]) / 2
         
     gate.weight=torch.nn.Parameter(w.to(device, dtype=torch.bfloat16))
     distilled_mlp.gate=gate
@@ -600,39 +694,51 @@ def prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config
     for name, parameter in distilled_mlp.named_parameters():
         if 'gate.' in name:
             parameter.requires_grad=True
+        if "multiplexed_experts." in name:
+            parameter.requires_grad=True
         else:
             parameter.requires_grad=False
     
-    for name, module in tqdm(distilled_mlp.named_modules()):
-        if isinstance(module, torch.nn.Linear):
-            rsetattr(
-                distilled_mlp,
-                name,
-                lora.Linear(
-                    module,
-                    adapter_name="adapter",
-                    r=distillation_config.dora_rank,
-                    lora_alpha=distillation_config.dora_rank,
-                    lora_dropout=0.05,
-                    use_dora=True,
-                ).to(device=device, dtype=dtype)
-            )
-            
+    # for name, module in tqdm(distilled_mlp.named_modules()):
+    #     if isinstance(module, torch.nn.Linear):
+    #         # if 'gate_proj' in name or 'up_proj' in name:
+    #         rsetattr(
+    #             distilled_mlp,
+    #             name,
+    #             lora.Linear(
+    #                 module,
+    #                 adapter_name="adapter",
+    #                 r=distillation_config.dora_rank,
+    #                 lora_alpha=distillation_config.dora_rank,
+    #                 lora_dropout=0.05,
+    #                 use_dora=True,
+    #             ).to(device=device, dtype=dtype)
+    #         )
+        
     train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
 
     optimizer = AdEMAMix(
         filter(lambda p: p.requires_grad, distilled_mlp.parameters()),
         lr=distillation_config.learning_rate,
-        betas=(0.7, 0.999, 0.9999),
+        betas=(0.9, 0.999, 0.9999),
         alpha=5
     )
     
     scheduler = WarmupCosineAnnealingLR(
         optimizer,
         warmup_steps=distillation_config.gradient_accumulation_steps * 0, ## warmup for 32 virtual steps
-        total_steps=train_batches,
+        total_steps=train_batches * distillation_config.n_epochs,
         min_lr=distillation_config.learning_rate * distillation_config.end_factor
     )
+    
+    # optimizer=AdamWScheduleFree(
+    #     filter(lambda p: p.requires_grad, distilled_mlp.parameters()),
+    #     lr=distillation_config.learning_rate,
+    #     betas=(0.7,0.999),
+    #     weight_decay=0.05,
+    # )
+    
+    # scheduler=None
 
     criterion = torch.nn.functional.smooth_l1_loss
     return distilled_mlp, optimizer, scheduler, criterion

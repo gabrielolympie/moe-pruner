@@ -24,7 +24,8 @@ from utils.torch_utils import (
 )
 
 
-# python 4_unhealed_aggregation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method progressive --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 8 --target_active_expert 4
+# python 4_unhealed_aggregation.py --pruning_method progressive --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --calibrate_merge 1 --n_epochs 1 --end_layer 27 --target_routed_expert 16 --target_active_expert 6
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
@@ -134,7 +135,10 @@ if __name__=="__main__":
             layer.mlp.__init__(config)
             layer.mlp.shared_experts=shared
             
-            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
+            if distillation_config.pruning_method=="progressive":
+                export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
+            else:
+                export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}/layer_{layer_idx}"
             layer.mlp.load_state_dict(torch.load(export_path))
             
     print('Dequant Gemm layers')
@@ -156,7 +160,12 @@ if __name__=="__main__":
     model.config=config
     
     print('Saving')
-    unhealed_name=model_name+f"_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}_unhealed"
+    if distillation_config.pruning_method=="progressive":
+        unhealed_name=model_name+f"_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_unhealed"
+    else:
+        unhealed_name=model_name+f"_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}_{distillation_config.calibrate_merge}_{distillation_config.n_epochs}_unhealed"
+ 
+    
     unhealed_name=unhealed_name.replace('_awq', '')
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)

@@ -39,9 +39,7 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_progressive.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 3  --target_routed_expert 8 --target_active_expert 6
-# python 3_layer_distillation_progressive.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 3  --target_routed_expert 8 --target_active_expert 6
-
+# python 3_layer_distillation_progressive.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 2 --target_routed_expert 16 --target_active_expert 4
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
@@ -88,7 +86,7 @@ if __name__=="__main__":
         eval_batches=16,
         gradient_accumulation_steps= 1,
         learning_rate= 4e-4,
-        end_factor= 0.1,
+        end_factor= 0.8,
         calibrate_merge=calibrate_merge,
         skip_first_tokens=0, ## useful to avoid tuning on early tokens that have less informations
         pruning_method=pruning_method, # topk , act_cl, state_cl
@@ -144,12 +142,21 @@ if __name__=="__main__":
 
         os.makedirs(path_config.moe_states, exist_ok=True)
 
-        distillation_config.n_epochs=1
-        distillation_config.learning_rate=3e-4
-        distillation_config.end_factor=0.4
-        distillation_config.gradient_accumulation_steps=1
+        # distillation_config.n_epochs=1
+        # distillation_config.learning_rate=3e-4
+        # distillation_config.end_factor=0.4
+        # distillation_config.gradient_accumulation_steps=1
 
         distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
+        
+        if distilled_mlp.config.num_experts_per_tok != distillation_config.target_active_expert:
+            print('updating active')
+            distilled_mlp.config.num_experts_per_tok=distillation_config.target_active_expert
+            distilled_mlp.num_experts_per_tok=distillation_config.target_active_expert
+            
+            distilled_mlp.gate.config.num_experts_per_tok=distillation_config.target_active_expert
+            distilled_mlp.gate.top_k=distillation_config.target_active_expert
+        
         train_batches = len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}"))) - distillation_config.eval_batches
 
         halve_every = 128
@@ -170,23 +177,10 @@ if __name__=="__main__":
                     if len(distilled_mlp.experts) > distillation_config.target_routed_expert:
                         print('halving')
                         distilled_mlp=merge_and_unload(distilled_mlp)
-                
-                        if epoch > 0:
-                            os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}", exist_ok=True)
-                            export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distilled_mlp.target_routed_expert}a{distilled_mlp.num_experts_per_tok}/layer_{layer_idx}"
-                            torch.save(distilled_mlp.state_dict(), export_path)
                         
                         distilled_mlp=halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device)
                         distilled_mlp, optimizer, scheduler, criterion = prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config, layer_idx, device, dtype=torch.bfloat16)
-                    else:
-                        ## Else reduce number of active expert
-                        if distilled_mlp.config.num_experts_per_tok != distillation_config.target_active_expert:
-                            print('updating active')
-                            distilled_mlp.config.num_experts_per_tok=distillation_config.target_active_expert
-                            distilled_mlp.num_experts_per_tok=distillation_config.target_active_expert
-                            
-                            distilled_mlp.gate.config.num_experts_per_tok=distillation_config.target_active_expert
-                            distilled_mlp.gate.top_k=distillation_config.target_active_expert
+
                 with torch.amp.autocast(device):
                     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
                     outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
@@ -245,14 +239,12 @@ if __name__=="__main__":
 
         writer.close()
 
-
-        
         ## Merge adapter and save
         distilled_mlp=merge_and_unload(distilled_mlp)
 
         os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}", exist_ok=True)
         export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}a{distillation_config.target_active_expert}/layer_{layer_idx}"
-        torch.save(distilled_mlp.state_dict(), export_path)
+        torch.save(distilled_mlp.state_dict(), export_path+f"_{best_loss}")
 
                 
         

@@ -35,7 +35,7 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 2  --target_routed_expert 16 --target_active_expert 4
 # python 3_layer_distillation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
 
 if __name__=="__main__":
@@ -268,7 +268,6 @@ if __name__=="__main__":
 
         
         ## Merge adapter and save
-        
         for name, module in tqdm(distilled_mlp.named_modules()):
             if isinstance(module, lora.Linear):
                 module.merge()
@@ -279,7 +278,4 @@ if __name__=="__main__":
                     module.base_layer
                 )
         
-        torch.save(distilled_mlp.state_dict(), export_path)
-
-                
-        
+        torch.save(distilled_mlp.state_dict(), export_path+f"_{best_loss}")
