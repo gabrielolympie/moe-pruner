@@ -86,6 +86,7 @@ Due to hardware limitation, this repo required a few hacks to work properly. You
 - Utilities to analyse experts activations and experts similarity, implemented with numba for blazing fast execution
 - A legacy fp8_linear layer, which is a pure pytorch implementation of the Deepseek fp8 kernel, compatible with Ampere gpu inference (not sure about training).
 - Progressive expert merging, a new method that is using  sce merging to progressively merge the experts based on the similarity of their output, achieving a good knowledge preservation of the experts.
+- Expert Multiplexing : an experimental way to merge several expert into a single one, preserve the original gate of the model, and route the inputs in the merged model adequately. So far seems the most stable method, with coherent scaling.
 
 
 ## Disclaimer
