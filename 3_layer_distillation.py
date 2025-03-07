@@ -35,8 +35,8 @@ from utils.torch_utils import (
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 2  --target_routed_expert 16 --target_active_expert 4
-# python 3_layer_distillation.py --pruning_method topk --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method topk --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
+# python 3_layer_distillation.py --pruning_method actcl --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --calibrate_merge 1 --n_epochs 1  --target_routed_expert 8 --target_active_expert 4
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
@@ -211,7 +211,7 @@ if __name__=="__main__":
                         hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
                         outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                        residual = hidden_states
+                        residual = deepcopy(hidden_states)
                         hidden_states = layer_norm(hidden_states)
 
                         pred = distilled_mlp(hidden_states)
@@ -239,7 +239,7 @@ if __name__=="__main__":
                         hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
                         outputs = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                        residual = hidden_states
+                        residual = deepcopy(hidden_states)
                         hidden_states = layer_norm(hidden_states)
 
                         pred = distilled_mlp(hidden_states)

@@ -496,17 +496,17 @@ def prepare_distillat_act_cl(distilled_mlp, layer_norm, scoring_func,  distillat
         for k in merged_expert_state_dict.keys():
             tensors=[expert.state_dict()[k] for expert in expert_to_merge]
             
-            merged_expert_state_dict[k]=torch.squeeze(sce_merge(
-                tensors,
-                merged_expert_state_dict[k],
-                select_topk=0.3
-            ))
-            
-            # merged_expert_state_dict[k]=multislerp(
+            # merged_expert_state_dict[k]=torch.squeeze(sce_merge(
             #     tensors,
-            #     weight=[1/len(tensors)] * len(tensors),
-            #     base_tensor=merged_expert_state_dict[k],
-            # )
+            #     merged_expert_state_dict[k],
+            #     select_topk=0.3
+            # ))
+            
+            merged_expert_state_dict[k]=multislerp(
+                tensors,
+                weight=[1/len(tensors)] * len(tensors),
+                base_tensor=merged_expert_state_dict[k],
+            )
             
 
         merged_expert = deepcopy(expert_to_merge[0])
@@ -556,8 +556,6 @@ def prepare_distillat_topk(distilled_mlp, layer_norm, distillation_config, path_
     distilled_mlp.gate=gate
     distilled_mlp.experts =new_experts
     return distilled_mlp
-
-
 
 def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_config, layer_idx, device):
     for parameter in distilled_mlp.parameters():
@@ -613,8 +611,8 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
     #     new_experts[i].load_state_dict(expert_1_state_dict)
     #     w[i]= gate.weight[index]
     
-    # affinity_matrix=cooccurrence_matrix(topk_idx, len(np.unique(topk_idx)))
-    affinity_matrix=build_affinity_matrix(hidden_states)
+    affinity_matrix=cooccurrence_matrix(topk_idx, len(np.unique(topk_idx)))
+    # affinity_matrix=build_affinity_matrix(hidden_states)
     print(affinity_matrix.shape)
     affinity_matrix=(affinity_matrix - affinity_matrix.min())/(affinity_matrix.max()-affinity_matrix.min())
     pairs=pair_items_by_affinity(affinity_matrix)
@@ -634,49 +632,22 @@ def halve_distilled_mlp(distilled_mlp, layer_norm, distillation_config, path_con
         expert_1_state_dict=distilled_mlp.experts[ref].state_dict()
         expert_2_state_dict=distilled_mlp.experts[aux].state_dict()
         
-        k1 = "gate_proj.weight"
-        k2 = "up_proj.weight"
-        k3 = "down_proj.weight"
         
-        # expert_1_state_dict[k1]=sce_merge(
-        #     [expert_1_state_dict[k1], expert_2_state_dict[k1]],
-        #     expert_1_state_dict[k1],
-        #     select_topk=0.1
-        # )
+        for k in expert_1_state_dict.keys():
+            expert_1_state_dict[k] = slerp(
+                0.5,
+                expert_1_state_dict[k], 
+                expert_2_state_dict[k],
+            )
+            # expert_1_state_dict[k]=sce_merge(
+            #     [expert_1_state_dict[k], expert_2_state_dict[k]],
+            #     expert_1_state_dict[k],
+            #     select_topk=0.2
+            # )
         
-        # expert_1_state_dict[k2]=sce_merge(
-        #     [expert_1_state_dict[k2], expert_2_state_dict[k2]],
-        #     expert_1_state_dict[k2],
-        #     select_topk=0.1
-        # )
-                
-        # expert_1_state_dict[k3]=sce_merge(
-        #     [expert_1_state_dict[k3], expert_2_state_dict[k3]],
-        #     expert_1_state_dict[k3],
-        #     select_topk=0.1
-        # )
-        
-        expert_1_state_dict[k1] = 0.5 * expert_1_state_dict[k1] + 0.5 * expert_2_state_dict[k1]
-        expert_1_state_dict[k2] = 0.5 * expert_1_state_dict[k2] + 0.5 * expert_2_state_dict[k2]
-        expert_1_state_dict[k3] = 0.5 * expert_1_state_dict[k3] + 0.5 * expert_2_state_dict[k3]
-        
-        # expert_1_state_dict[k1]=slerp(
-        #     0.1,
-        #     expert_1_state_dict[k1],
-        #     expert_2_state_dict[k1],
-        # )
-        
-        # expert_1_state_dict[k2]=slerp(
-        #     0.1,
-        #     expert_1_state_dict[k2],
-        #     expert_2_state_dict[k2],
-        # )
-        
-        # expert_1_state_dict[k3]=slerp(
-        #     0.5,
-        #     expert_1_state_dict[k3],
-        #     expert_2_state_dict[k3],
-        # )
+        new_experts[i] = deepcopy(distilled_mlp.experts[ref])
+        new_experts[i].load_state_dict(expert_1_state_dict)
+        w[i]= gate.weight[ref]
         
         new_experts[i] = deepcopy(distilled_mlp.experts[pair[0]])
         new_experts[i].load_state_dict(expert_1_state_dict)
@@ -695,6 +666,8 @@ def prepare_moe_for_distillation(distilled_mlp, distillation_config, path_config
         if 'gate.' in name:
             parameter.requires_grad=True
         if "multiplexed_experts." in name:
+            parameter.requires_grad=True
+        if "experts" in name and not('shared' in name):
             parameter.requires_grad=True
         else:
             parameter.requires_grad=False

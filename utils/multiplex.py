@@ -9,6 +9,8 @@ from transformers.activations import ACT2FN
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+        
+    
 
 class MultiplexedMLP(torch.nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None):
@@ -132,20 +134,6 @@ class MultiplexedMOE(torch.nn.Module):
             T_max=train_batches,
             eta_min=learning_rate * 0.8
         )
-        
-
-        # self.optimizers = [AdEMAMix(
-        #     filter(lambda p: p.requires_grad, self.multiplexed_experts[idx].parameters()),
-        #     lr=learning_rate,
-        #     betas=(0.9, 0.999, 0.9999),
-        #     alpha=5
-        # ) for idx in range(len(inv_mapping_dict))]
-
-        # self.schedulers = [torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     self.optimizers[idx],
-        #     T_max=train_batches,
-        #     eta_min=learning_rate * 0.1
-        # ) for idx in range(len(inv_mapping_dict))]
 
         self.criterion = torch.nn.functional.smooth_l1_loss
 

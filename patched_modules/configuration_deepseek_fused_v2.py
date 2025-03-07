@@ -123,7 +123,9 @@ class DeepseekV2Config(PretrainedConfig):
         num_key_value_heads=32,
         n_shared_experts = None,
         n_routed_experts = None,
-        n_multiplexed_routed_experts = None,
+        n_fused_experts = None,
+        fused_expert_dora_rank = None,
+        fused_expert_method = "mixture",
         ep_size = 1,
         routed_scaling_factor = 1.0,
         kv_lora_rank = 512,
@@ -166,7 +168,9 @@ class DeepseekV2Config(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.n_shared_experts = n_shared_experts
         self.n_routed_experts = n_routed_experts
-        self.n_multiplexed_routed_experts = n_multiplexed_routed_experts
+        self.n_fused_experts = n_fused_experts
+        self.fused_expert_dora_rank = fused_expert_dora_rank
+        self.fused_expert_method=fused_expert_method
         self.ep_size = ep_size
         self.routed_scaling_factor = routed_scaling_factor
         self.kv_lora_rank = kv_lora_rank
