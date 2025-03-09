@@ -423,11 +423,12 @@ class FusedLinear(nn.Module):
             output = output + self.scaling_factor[None] * x
             
         if self.adapter_type == 'mixture':
-            x = torch.einsum('bh,krh->bkr', x, self.qa_weights)
-            x = torch.einsum('bkr,khr->bkh', x, self.qb_weights)
-            x = torch.einsum('bkh,bk->bkh', x, top_k_weights)
-            x = torch.sum(x, dim=1)
-            output=output + self.scaling_factor[None] * x
+            if len(x.shape) == 2:
+                x = torch.einsum('bh,krh->bkr', x, self.qa_weights)
+                x = torch.einsum('bkr,khr->bkh', x, self.qb_weights)
+                x = torch.einsum('bkh,bk->bkh', x, top_k_weights)
+                x = torch.sum(x, dim=1)
+                output=output + self.scaling_factor[None] * x
         return output
 
 class FusedMLP(torch.nn.Module):

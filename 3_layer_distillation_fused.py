@@ -46,8 +46,10 @@ import pickle
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_fused.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 15 --calibrate_merge 1 --n_epochs 2 --target_routed_expert 4 --target_active_expert 1
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 15 --end_layer 27 --calibrate_merge 1 --n_epochs 2 --target_routed_expert 4 --target_active_expert 1
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 2 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 4 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 8 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 16 --dora_rank 8
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")

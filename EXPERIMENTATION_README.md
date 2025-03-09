@@ -14,34 +14,67 @@ You can also propose improvement on the git repo.
 The primary goal is to drastically reduce the computational and memory requirements of DeepSeek-v3 while retaining a reasonable level of performance.  This is accomplished through a multi-stage distillation and pruning process.
 
 ## Methodology and abloation study.
+
 ### Core methodology:
 - 1. Create a small but high quality calibration dataset
 - 2. Use the dataset to prune experts, with several variant (see ablation below)
 - 3. Consolidate the model with pruned experts
 - 4. Post train on an instruct dataset to recover
 
-### Pruning approaches
-The most challenging work was to find an appropriate pruning method, i tested several approaches (some ablation details can be found in the EXPERIMENTATION_README)
-- Topk pruning: simply take the k most activated experts on a given layer and prune every other
-- Act_cl : cluster experts based on their co activation
-- State_cl : cluster experts based on the similarity of their outputs
-- Progressive_merge : halve progressively the number of experts, with some healing in between
-- Multiplexage : fuse the experts and add a bias term to the hiddenstates that is dependant on the gate activation vector
-- Fused lora : fuse experts and add a lora term that takes into account a latent projection of the gate vector
-- Mixture of lora : decompose the experts into a core expert and a mixture of lora experts that uses the original gate information to handle activations patterns
+### Ablation
+Figures of the ablation for deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct can be found in the img folder.
 
-To fuse the experts, we relied on three methodology:
-- multi slerp : spherical interpolation of mean expert
-- sce : a technique developped by https://github.com/fanqiwan/FuseAI
-- naive : a simple weight averaging
+#### Method 1 : act_cl
+This method uses gate information to cluster the experts based on their co activation (i.e affinity is the number of time two experts are activated together).
+The clustering algorithm is a simple spectral clustering based on the resulting affinity matrix.
 
-### Notes:
-The most powerfull approach seems to be a mix of the multiplexage and mixture of lora approach.
-This technique is the final one used to train the current batch of fused models, and it exhibit interesting properties in term of scaling laws, according to three axis:
-- Expert scaling : the end performance of the fused model seems to scale **linearly** in my experiments with the number of final experts, hence with more extensive testing it might be possible to predict in advance the final performance based on number of weights.
-- Data scaling : the distillation losses during the pruning where far from being saturated, and seems to follow a similar pattern as usual llm training, following the habitual scaling laws.
-- Rank scaling : through the rank of the mixture of Lora, it is possible to adapt efficiently the number of parameters allocated to healing, hence enabling to scale the technique on more compute. This scaling seems to use a regular polynomial scaling law as well.
-- Post training on dolphin r1 gave a weird vibe to the models writing, hence is switched to ultrachat for this part, with a bit of the LIMO dataset in addition. I did not perform any DPO or RLHF to the model, so the outputs will be kinda raw.
+The experts of a given cluster are then merged using the SCE method from mergekit.
+
+#### Method 2 : state_cl
+This method is similar to act_cl but uses a different approach to build the similarity matrix, instead of monitoring the experts activation, it computes the mean pairwise cosine similarity of two given experts outputs.
+
+#### Method 3 : tok_k
+This method is more basic and just keeps the experts that have the highest activation count on the calibration dataset.
+
+#### Variant 1 : False_1
+This variant means that there was no calibration on the newly created experts after merging, so postraining is using the raw weights from the pruning
+
+#### Variant 2 : True_1
+This variant means that the pruned experts are calibrated for one epoch after pruning, hence some recovery is expected. Calibration is done with original weights still in AWQ format, and new experts weights in frozen bfloat16 with a Dora layer on top.
+
+#### Variant 3 : True_5
+This variant means that the pruned experts are calibrated for five epoch after pruning, hence lot recovery is expected, but might lead to overfitting which might affect the post training negatively. Calibration is done with original weights still in AWQ format, and new experts weights in frozen bfloat16 with a Dora layer on top.
+
+### Results of the different methods
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 16 True_5
+
+![Layer 16 Pruning Comparison](img/layer_16_true_5.png)
+
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5 (with top_k beating the other methods)
+
+![Layer 24 Pruning Comparison](img/layer_24_true_5.png)
+
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5
+
+![Layer 25 Pruning Comparison](img/layer_25_true_5.png)
+
+#### Comparison of clustering methods (act_cl vs state_cl vs tok_k) on layer 24 True_5 (with top_k beating the other methods)
+
+![Layer 26 Pruning Comparison](img/layer_26_true_5.png)
+
+#### Comparison of postraining
+
+### Analysis and hypothesis
+Observations on layer wise distillation:
+- On higher layers, regarding distillation loss, act_cl and state_cl outperform substantially top_k, with act_cl slightly above act_cl
+- On some specific layers, especially deeper layers, top_k outperform the two other by a wide margin, maybe hinting at a higher information density, or a possibility to improve the fusion (i'll perform a new test with both higher and lower information retention treshold in sce to wee how it fares.)
+- Whether or not the topk will  beat the other seems to depend on random_seed, with variable results.
+- As we go deeper in the network, the distillation loss seems to converge toward a higher value.
+
+Observations on post training:
+- The True 5 variants, despite reaching a better loss than True 1, seems to mostly output correct grammar, but non sensical content.
+- The True 1 variants are much better in this regard, and seems to even exibit some reasoning capabilities,despite their small size (1b) and compression factor (1/16) wich is kinda impressive
+
 
 
 ## Contributions
@@ -54,10 +87,10 @@ Due to hardware limitation, this repo required a few hacks to work properly. You
 - A legacy fp8_linear layer, which is a pure pytorch implementation of the Deepseek fp8 kernel, compatible with Ampere gpu inference (not sure about training).
 - Progressive expert merging, a new method that is using  sce merging to progressively merge the experts based on the similarity of their output, achieving a good knowledge preservation of the experts.
 - Expert Multiplexing : an experimental way to merge several expert into a single one, preserve the original gate of the model, and route the inputs in the merged model adequately. So far seems the most stable method, with coherent scaling.
-- Fused expert layers, with both a training version with helpers to merge existing layer, and an inference version to just load and run, some patched deepseek modules as well to ease handling.
 
 
 ## Disclaimer
+
 This project is experimental and under active development.  The provided code and methodology are subject to change.  There is no guarantee of performance or stability.  Use at your own discretion.
 
 ## Acknowledgements
