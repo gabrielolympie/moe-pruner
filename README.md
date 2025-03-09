@@ -1,74 +1,91 @@
-# moe-pruner: DeepSeek-v3 Pruning for the GPU Poor
+# moe-pruner: Democratizing DeepSeek-v3 with Expert Pruning
 
-This repository provides a methodology for pruning DeepSeek-v3, a Mixture-of-Experts (MoE) model, to make it more accessible for users with limited GPU resources ("the GPU poor").  This is achieved by significantly reducing the number of experts in the MoE layers.
+This repository introduces a novel, experimental methodology for pruning DeepSeek-v3, a powerful Mixture-of-Experts (MoE) model.  Our goal is to dramatically reduce its computational and memory footprint, making it accessible to users with limited GPU resources (hence, "for the GPU poor").  We achieve this by aggressively reducing the number of experts within the MoE layers, combined with knowledge distillation techniques.
 
-**Warning:** This is a highly experimental technique.  Results are not guaranteed, and significant improvements are planned for future versions.  Use at your own risk.
-
-## CONTRIBUTE
-Due to hardware limitation, i was forced to make a lot of trade off. If you'd like to participate in upcoming versions with a higher compute budget, you can donate here: https://gofund.me/1516dccd
-
-You can also propose improvement on the git repo.
+**Important:** This project is highly experimental and under active development. Results are not guaranteed, and significant improvements are planned.  Use at your own risk and be aware that the code and methodology are subject to change.
 
 ## Project Goal
 
-The primary goal is to drastically reduce the computational and memory requirements of DeepSeek-v3 while retaining a reasonable level of performance.  This is accomplished through a multi-stage distillation and pruning process.
+Our primary objective is to make DeepSeek-v3 usable on consumer-grade hardware.  We aim to drastically lower the computational and memory demands while preserving a reasonable level of performance. This is achieved through a carefully designed, multi-stage process involving expert pruning, model consolidation, and knowledge distillation.
 
-## Methodology and abloation study.
-### Core methodology:
-- 1. Create a small but high quality calibration dataset
-- 2. Use the dataset to prune experts, with several variant (see ablation below)
-- 3. Consolidate the model with pruned experts
-- 4. Post train on an instruct dataset to recover
+## Methodology and Ablation Study
 
-### Pruning approaches
-The most challenging work was to find an appropriate pruning method, i tested several approaches (some ablation details can be found in the EXPERIMENTATION_README)
-- Topk pruning: simply take the k most activated experts on a given layer and prune every other
-- Act_cl : cluster experts based on their co activation
-- State_cl : cluster experts based on the similarity of their outputs
-- Progressive_merge : halve progressively the number of experts, with some healing in between
-- Multiplexage : fuse the experts and add a bias term to the hiddenstates that is dependant on the gate activation vector
-- Fused lora : fuse experts and add a lora term that takes into account a latent projection of the gate vector
-- Mixture of lora : decompose the experts into a core expert and a mixture of lora experts that uses the original gate information to handle activations patterns
+### Core Methodology:
 
-To fuse the experts, we relied on three methodology:
-- multi slerp : spherical interpolation of mean expert
-- sce : a technique developped by https://github.com/fanqiwan/FuseAI
-- naive : a simple weight averaging
+1.  **Calibration Dataset Creation:**  A small, high-quality dataset is constructed for calibration. This dataset is crucial for guiding the pruning process.
+2.  **Expert Pruning:**  Various pruning strategies are employed to identify and remove less critical experts (see "Pruning Approaches" below for details).
+3.  **Model Consolidation:** The pruned model, with a significantly reduced number of experts, is consolidated.
+4.  **Post-Training (Knowledge Recovery):**  The consolidated model is further trained on an instruction dataset (UltraChat, with some LIMO) to recover performance lost during pruning.  No DPO or RLHF is performed, resulting in a "raw" output style.
 
-### Notes:
-The most powerfull approach seems to be a mix of the multiplexage and mixture of lora approach.
-This technique is the final one used to train the current batch of fused models, and it exhibit interesting properties in term of scaling laws, according to three axis:
-- Expert scaling : the end performance of the fused model seems to scale **linearly** in my experiments with the number of final experts, hence with more extensive testing it might be possible to predict in advance the final performance based on number of weights.
-- Data scaling : the distillation losses during the pruning where far from being saturated, and seems to follow a similar pattern as usual llm training, following the habitual scaling laws.
-- Rank scaling : through the rank of the mixture of Lora, it is possible to adapt efficiently the number of parameters allocated to healing, hence enabling to scale the technique on more compute. This scaling seems to use a regular polynomial scaling law as well.
-- Post training on dolphin r1 gave a weird vibe to the models writing, hence is switched to ultrachat for this part, with a bit of the LIMO dataset in addition. I did not perform any DPO or RLHF to the model, so the outputs will be kinda raw.
+### Pruning Approaches
 
+A key challenge was identifying an effective pruning method.  We explored (and continue to explore) several approaches, including:
 
-## Contributions
-Due to hardware limitation, this repo required a few hacks to work properly. You'll find ressources for:
-- AWQ single layer loading, load a single layer in the gpu memory to avoid OOM
-- AWQ dequant and AWQ Dora merge, enabling lower memory usage thanks to 4bit quantization
-- Utilities to manage torch vram and load targeted modules inside a model (for some reasons accelerate implementation of the same stuff was not working)
-- Dora layer implementation, with adaptations for bnb and hqq (inspired by the Answer.ai repo fsdp qlora)
-- Utilities to analyse experts activations and experts similarity, implemented with numba for blazing fast execution
-- A legacy fp8_linear layer, which is a pure pytorch implementation of the Deepseek fp8 kernel, compatible with Ampere gpu inference (not sure about training).
-- Progressive expert merging, a new method that is using  sce merging to progressively merge the experts based on the similarity of their output, achieving a good knowledge preservation of the experts.
-- Expert Multiplexing : an experimental way to merge several expert into a single one, preserve the original gate of the model, and route the inputs in the merged model adequately. So far seems the most stable method, with coherent scaling.
-- Fused expert layers, with both a training version with helpers to merge existing layer, and an inference version to just load and run, some patched deepseek modules as well to ease handling.
+*   **Top-k Pruning:**  The simplest approach – selecting the *k* most frequently activated experts per layer and discarding the rest.
+*   **Activation Clustering (Act\_cl):** Clustering experts based on their co-activation patterns.  Experts that fire together are considered redundant.
+*   **State Clustering (State\_cl):** Clustering experts based on the similarity of their output states.  Experts producing similar outputs are considered redundant.
+*   **Progressive Merge:**  Iteratively halving the number of experts, with "healing" (fine-tuning) steps in between to mitigate performance loss.
+*   **Multiplexage:**  Fusing experts and introducing a bias term to the hidden states, dependent on the original gate activation vector. This allows the model to retain some of the routing information from the original MoE.
+*   **Fused LoRA:**  Combining expert weights and adding a LoRA (Low-Rank Adaptation) term that incorporates a latent projection of the gate vector.
+*   **Mixture of LoRA:**  Decomposing experts into a core expert and a mixture of LoRA experts. The original gate information is used to manage the activation patterns of the LoRA experts.
 
+**Expert Fusion Techniques:**
+
+To combine the weights of experts during merging, we utilize:
+
+*   **Multi-SLERP:** Spherical Linear Interpolation (SLERP) of the mean expert weights.
+*   **SCE (Similarity-based Coefficient Estimation):**  A technique developed by [FuseAI](https://github.com/fanqiwan/FuseAI).
+*   **Naive Averaging:** Simple averaging of expert weights.
+
+### Notes and Observations:
+
+The most promising approach currently is a hybrid of "Multiplexage" and "Mixture of LoRA." This method exhibits interesting scaling properties along three key axes:
+
+*   **Expert Scaling:**  Preliminary experiments suggest a *linear* relationship between the number of final experts and the fused model's performance.  This could allow for performance prediction based on model size.
+*   **Data Scaling:**  Distillation losses during pruning were far from saturation, suggesting that the process follows standard LLM training scaling laws. Further data could lead to significant improvements.
+*   **Rank Scaling:**  The rank of the "Mixture of LoRA" allows for efficient control over the number of parameters dedicated to knowledge recovery. This scaling appears to follow a polynomial law.
+* **Dataset choice**: Initially, post-training was done with the dolphin-r1 dataset, but this resulted in an undesirable writing style. Therefore, the final models were trained with ultrachat dataset, with additional data from LIMO.
+
+## Contributions & Included Resources
+
+Due to hardware constraints, several custom implementations and hacks were necessary. This repository includes resources for:
+
+*   **AWQ Single-Layer Loading:** Load individual layers into GPU memory to prevent Out-of-Memory (OOM) errors.
+*   **AWQ Dequantization and DoRA Merge:**  Utilities for lower memory usage via 4-bit quantization.
+*   **VRAM Management Utilities:**  Tools for managing PyTorch VRAM and loading specific model modules (addressing issues with standard `accelerate` implementations).
+*   **DoRA Layer Implementation:**  Adapted for BNB and HQQ (inspired by [Answer.ai's fsdp qlora](https://github.com/AnswerDotAI/fsdp_qlora)).
+*   **Expert Analysis Utilities:**  Tools for analyzing expert activations and similarity, implemented with Numba for performance.
+*   **Legacy FP8 Linear Layer:**  A pure PyTorch implementation of DeepSeek's FP8 kernel, compatible with Ampere GPU inference (training compatibility is uncertain).
+*   **Progressive Expert Merging:**  A novel method that leverages SCE merging to iteratively combine experts based on output similarity, preserving knowledge effectively.
+*   **Expert Multiplexing:**  An experimental technique for merging experts while retaining original gate information for appropriate input routing. This appears to be the most stable method, with consistent scaling behavior.
+*   **Fused Expert Layers:**  Includes both a training version (with helpers for merging existing layers) and an inference version (for loading and running the fused models).  Also includes patched DeepSeek modules for easier handling.
 
 ## Disclaimer
-This project is experimental and under active development.  The provided code and methodology are subject to change.  There is no guarantee of performance or stability.  Use at your own discretion.
+
+This project is highly experimental and actively under development. The provided code and methodology are subject to change.  Performance and stability are not guaranteed.  Use at your own discretion.
 
 ## Acknowledgements
-Special thanks to several projects that inspired and helped the construction of this:
-- [CognitiveComputations](https://huggingface.co/cognitivecomputations) for their work on the very high quality dolphin-r1 dataset
-- [FuseChat](https://github.com/fanqiwan/FuseAI/tree/main/FuseChat) for their work on knowledge fusion
-- [DeepSeek](https://github.com/deepseek-ai) for their openess and awesome technical work
-- [AnswerAI](https://github.com/AnswerDotAI/fsdp_qlora) for their work on fsdp qlora, even if i did not use it in the end
-- [HuggingFace](https://huggingface.co/) and [PyTorch](https://pytorch.org/) for creating the ecosystem and tools that enabled to iterate very quickly.
-- [OpenAi](https://openai.com/) for teaching me the value of open source AI by giving the example of what you shouldn't do.
+
+We gratefully acknowledge the contributions of the following projects:
+
+*   **CognitiveComputations:** Creators of the high-quality dolphin-r1 dataset.
+*   **FuseAI:** Developers of the FuseChat project and the SCE merging technique.
+*   **DeepSeek:** For their open-source contributions and excellent technical work.
+*   **AnswerAI:** For their work on fsdp qlora.
+*   **Hugging Face and PyTorch:** For providing the essential ecosystem and tools that facilitate rapid iteration.
+*   **OpenAI:**  For inadvertently highlighting the importance of open-source AI through their contrasting approach.
 
 ## Contributing
 
-Contributions are welcome!  If you have suggestions for improvements, bug fixes, or new features, please open an issue or submit a pull request.
+Contributions are highly encouraged!  If you have suggestions, bug fixes, or new features, please open an issue or submit a pull request.
+
+Areas where contributions are particularly welcome:
+
+*   **Quantization:**  The current implementation of fused experts presents challenges for integration with existing quantization engines. Expertise in this area is greatly appreciated.
+*   **Inference:**  Adaptations for inference frameworks like vLLM, Aphrodite, exllama v2, and llama.cpp would significantly improve the usability of this project.
+*   **Further Ablation Studies:**  More extensive testing and refinement of the pruning and fusion techniques.
+*  **Theoretical grounding** : Some part of the method are still mostly empirical, formalizing them would help stability.
+
+## Call to Action / Support
+
+This project was developed under significant hardware limitations, requiring numerous trade-offs.  If you would like to support the development of future versions with increased computational resources, you can donate here: [https://gofund.me/1516dccd](https://gofund.me/1516dccd).  You are also welcome to propose improvements directly on the GitHub repository.

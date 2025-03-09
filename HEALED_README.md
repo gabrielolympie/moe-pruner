@@ -5,40 +5,47 @@ library_name: transformers
 <!-- markdownlint-disable html -->
 <!-- markdownlint-disable no-duplicate-header -->
 
-README.md
-# Unhealed DeepSeek-Coder-v2-Lite-Instruct Fused Models (Research Release)
+## DeepSeek-Coder-V2-lite-instruct-Fused-preview:  Compressed and Efficient Code Generation
 
-## CRITICAL NOTE:  Untrained Fusion - Requires Healing!
+This README introduces a series of fused models derived from DeepSeek-Coder-V2-lite-instruct.  These models represent a significant reduction in size while retaining strong performance, demonstrating a novel approach to model compression.
 
-**These are *unhealed*, experimental versions of DeepSeek-Coder-v2-lite-instruct created through model fusion.  They are *not* ready for direct use and will exhibit unpredictable behavior without significant post-training.** These models are released *exclusively* for research purposes and require a specific "healing" process to restore functionality. Do *not* use these models without understanding and applying the healing procedure.
+**Motivation (Why Fuse an "Old" Model?)**
 
-## What to Expect (Before Healing)
+This project serves as a proof-of-concept for a new model pruning and fusion technique.  The core methodology is detailed in the accompanying GitHub repository: [https://github.com/gabrielolympie/moe-pruner](https://github.com/gabrielolympie/moe-pruner).  The long-term goal is to provide a method for pruning large Mixture-of-Experts (MoE) models, creating smaller, locally runnable models that maintain a significant portion of the original model's capabilities.
 
-These models are in an initial, unstable state after the fusion process.  Expect significantly degraded performance and unpredictable outputs.  They are *not* representative of the final capabilities of a properly trained fused model. This is a very early iteration of the fusion and distillation technique, using a small sample size for distillation.  Significant room for improvement remains in the distillation process.
+**Preview Models:  Exploring Compression Levels**
 
-## Healing Instructions (Required)
+The DeepSeek-Coder-V2-lite-instruct model, which utilizes 64 experts, forms the foundation for these preview models.  We offer four variations, each with a different level of compression:
 
-**Crucially, you *must* perform post-training to make these models usable.**  The necessary scripts and detailed instructions are available in the **moe-pruner** repository:
+*   **16 Fused Experts (~6B parameters):**  1/4 size reduction.
+*   **8 Fused Experts (~4B parameters):**  1/8 size reduction.
+*   **4 Fused Experts (~3B parameters):**  1/16 size reduction.
+*   **2 Fused Experts (~2B parameters):**  1/32 size reduction.
 
-**[https://github.com/gabrielolympie/moe-pruner](https://github.com/gabrielolympie/moe-pruner)**
+Despite their significantly reduced size, these models demonstrate surprisingly strong performance, exceeding expectations for their parameter counts.  Further, more comprehensive testing is planned.
 
-Follow the instructions in that repository *carefully* to "heal" the pruned model.  This process is essential to recover performance.
+**Technical Details and Scaling Properties**
 
-## Contributing and Future Improvements
+The fusion technique, refined through multiple iterations, combines *expert multiplexing* with a *mixture of LoRA decomposition*.  Preliminary results indicate promising scaling properties along three key dimensions:
 
-This release represents an initial exploration of model fusion and distillation. Due to hardware limitations, significant compromises were made during development.
+1.  **Expert Scaling:**  The performance of the fused model appears to scale *linearly* with the number of fused experts. This suggests the potential for predicting final performance based on the number of retained weights.
 
-We welcome contributions to improve this work!  There are two primary ways to help:
+2.  **Data Scaling:**  Distillation losses during the pruning process were far from saturation.  The observed trends align with typical LLM training scaling laws, indicating further improvements are possible with more training data.
 
-1.  **Financial Support:**  Larger-scale experiments require significant compute resources.  If you'd like to support future versions with a higher compute budget, you can donate here: [https://gofund.me/1516dccd](https://gofund.me/1516dccd)
+3.  **Rank Scaling:**  The rank of the LoRA mixture allows for efficient adjustment of the number of parameters used during the "healing" process. This enables scaling the technique to larger compute budgets, exhibiting polynomial scaling behavior similar to standard LoRA approaches.
 
-2.  **Code Contributions:**  Suggest improvements, bug fixes, or new features directly on the GitHub repository.
+These models are designated as "previews" because the distillation losses were not saturated during training.  Future iterations, potentially utilizing additional calibration data, may further enhance performance.
 
-We are actively working to improve the fusion and distillation techniques, and your contributions are greatly appreciated.
+## Call to Action: Contribute and Support
 
-## Disclaimer
+Due to hardware constraints, several trade-offs were necessary.  If you are interested in supporting future development with increased compute resources, donations are welcome: [https://gofund.me/1516dccd](https://gofund.me/1516dccd)
 
-These models are provided "as is" for research purposes only.  No guarantees are made regarding their performance or stability before the healing process is completed. Use at your own risk.
+**We actively encourage community contributions!**  We particularly welcome expertise in the following areas:
+
+*   **Quantization:** The current implementation of fused experts presents challenges for existing quantization engines.  Assistance in developing compatible quantization strategies is highly desired.
+*   **Inference:**  Integration with popular inference frameworks like vLLM, AphroditeEngine, ExLlamaV2, and llama.cpp would significantly improve usability.
+
+If you have suggestions for improvements, bug fixes, or new features, please open an issue or submit a pull request on the GitHub repository. Your contributions are valuable!
 
 #
 #
