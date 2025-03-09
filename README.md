@@ -1,6 +1,6 @@
-# moe-pruner: Democratizing DeepSeek-v3 with Expert Pruning
+# moe-pruner: Democratizing DeepSeek-v3 with Expert Fusion
 
-This repository introduces a novel, experimental methodology for pruning DeepSeek-v3, a powerful Mixture-of-Experts (MoE) model.  Our goal is to dramatically reduce its computational and memory footprint, making it accessible to users with limited GPU resources (hence, "for the GPU poor").  We achieve this by aggressively reducing the number of experts within the MoE layers, combined with knowledge distillation techniques.
+This repository introduces a novel, experimental methodology for fusing DeepSeek-v3, a powerful Mixture-of-Experts (MoE) model.  Our goal is to dramatically reduce its computational and memory footprint, making it accessible to the GPU poors.  We achieve this by aggressively reducing the number of experts within the MoE layers, combined with knowledge distillation techniques.
 
 **Important:** This project is highly experimental and under active development. Results are not guaranteed, and significant improvements are planned.  Use at your own risk and be aware that the code and methodology are subject to change.
 
@@ -13,11 +13,11 @@ Our primary objective is to make DeepSeek-v3 usable on consumer-grade hardware. 
 ### Core Methodology:
 
 1.  **Calibration Dataset Creation:**  A small, high-quality dataset is constructed for calibration. This dataset is crucial for guiding the pruning process.
-2.  **Expert Pruning:**  Various pruning strategies are employed to identify and remove less critical experts (see "Pruning Approaches" below for details).
+2.  **Expert Fusing:**  Various fusion strategies are employed to identify and remove less critical experts (see "Fusion Approaches" below for details).
 3.  **Model Consolidation:** The pruned model, with a significantly reduced number of experts, is consolidated.
 4.  **Post-Training (Knowledge Recovery):**  The consolidated model is further trained on an instruction dataset (UltraChat, with some LIMO) to recover performance lost during pruning.  No DPO or RLHF is performed, resulting in a "raw" output style.
 
-### Pruning Approaches
+### Fusion Approaches
 
 A key challenge was identifying an effective pruning method.  We explored (and continue to explore) several approaches, including:
 
