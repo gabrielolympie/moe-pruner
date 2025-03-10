@@ -132,7 +132,7 @@ def load_weights(model, model_name, weight_map, target_modules, device):
                         device=device
                     )
                 )
-            if i % 1000 == 0:
+            if i % 20000 == 0:
                 memory_cleanup()
     stream.synchronize()
     return model

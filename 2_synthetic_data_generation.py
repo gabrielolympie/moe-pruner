@@ -26,10 +26,8 @@ from utils.torch_utils import (
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 0 --batch_size 4 --max_length 512
-## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 1 --batch_size 4 --max_length 512
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 2 --batch_size 4 --max_length 512
-## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --n_batch 2048 --local_batch_size 512 --local_batch 3 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 1400 --local_batch_size 700 --local_batch 0 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 1400 --local_batch_size 700 --local_batch 1 --batch_size 4 --max_length 512
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Synthetic Data Generation Script")
@@ -100,12 +98,20 @@ if __name__=="__main__":
     )
 
     with init_empty_weights():
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+        # model = AutoModelForCausalLM.from_pretrained(
+        #     model_name,
+        #     trust_remote_code=True,
+        #     torch_dtype=dtype,
+        #     attn_implementation="flash_attention_2",
+        #     low_cpu_mem_usage=True
+        # )
+        
+        model = AutoModelForCausalLM.from_config(
+            config,
             trust_remote_code=True,
-            torch_dtype=dtype,
-            attn_implementation="flash_attention_2",
-            low_cpu_mem_usage=True
+            # torch_dtype=dtype,
+            # attn_implementation="flash_attention_2",
+            # low_cpu_mem_usage=True
         )
 
     for name, parameter in model.named_parameters():
@@ -117,34 +123,34 @@ if __name__=="__main__":
     destruct_module_optimized(model)
     memory_cleanup()
     
-    target_modules=[
-        "model.embed_tokens.weight"
-    ]
+    # target_modules=[
+    #     "model.embed_tokens.weight"
+    # ]
 
-    model=load_weights(model, model_name, weight_map, target_modules, device)
-    # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
+    # model=load_weights(model, model_name, weight_map, target_modules, device)
+    # # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
     
-    for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
-        batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
-        inputs = tokenizer(
-            batch,
-            max_length=generation_config.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        ).to(device)
+    # for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
+    #     batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
+    #     inputs = tokenizer(
+    #         batch,
+    #         max_length=generation_config.max_length,
+    #         padding="max_length",
+    #         truncation=True,
+    #         return_tensors="pt",
+    #     ).to(device)
 
-        hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
+    #     hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
 
-        os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
-        save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
+    #     os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
+    #     save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
 
     destruct_module_optimized(model)
     memory_cleanup()
     
-    for layer_idx in range(len(model.model.layers)):
+    for layer_idx in range(3, len(model.model.layers)):
         model.train()
-        model.model.layers[layer_idx].to_empty(device=device)
+        # model.model.layers[layer_idx].to_empty(device=device)
         
         target_modules=[f".layers.{layer_idx}."]
         
@@ -181,7 +187,11 @@ if __name__=="__main__":
                 hidden_states = model.model.layers[layer_idx].post_attention_layernorm(hidden_states)
 
                 ## For activations
-                topk_idx, topk_weight, aux_loss = model.model.layers[layer_idx].mlp.gate(hidden_states)
+                gate_output = model.model.layers[layer_idx].mlp.gate(hidden_states)
+                if len(gate_output) == 3:
+                    topk_idx, topk_weight, aux_loss = gate_output
+                else:
+                    topk_idx, topk_weight = gate_output
   
                 top_k_output.append(topk_idx)
                 top_k_weight.append(topk_weight)
