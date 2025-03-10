@@ -13,16 +13,16 @@ Naming convention is Num Fused experts / Num weights. I did not add the number o
 Uploading both final and unhealed models, for finetuning, i recommend using the unhealed models.
 
 ### DeepSeek-Coder-v2-lite
-2 Fused Experts / 2B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-2E-2B-preview
-4 Fused Experts / 2.5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-4E-2_5B-preview
-8 Fused Experts / 3B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-8E-3B-preview
-16 Fused Experts / 5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-16E-5B-preview
+- 2 Fused Experts / 2B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-2E-2B-preview
+- 4 Fused Experts / 2.5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-4E-2_5B-preview
+- 8 Fused Experts / 3B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-8E-3B-preview
+- 16 Fused Experts / 5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-16E-5B-preview
 
 ### DeepSeek-Coder-v2-lite unhealed
-2 Fused Experts / 2B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-2E-2B-preview-Unhealed
-4 Fused Experts / 2.5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-4E-2_5B-preview-Unhealed
-8 Fused Experts / 3B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-8E-3B-preview-Unhealed
-16 Fused Experts / 5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-16E-5B-preview-Unhealed
+- 2 Fused Experts / 2B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-2E-2B-preview-Unhealed
+- 4 Fused Experts / 2.5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-4E-2_5B-preview-Unhealed
+- 8 Fused Experts / 3B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-8E-3B-preview-Unhealed
+- 16 Fused Experts / 5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-16E-5B-preview-Unhealed
 
 ## Methodology and Ablation Study
 
