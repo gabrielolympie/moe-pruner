@@ -21,6 +21,7 @@ from utils.torch_utils import (
     rgetattr,
     load_weights,
     rhasattr,
+    convert_meta_model_to_awq
 )
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -113,6 +114,8 @@ if __name__=="__main__":
             # attn_implementation="flash_attention_2",
             # low_cpu_mem_usage=True
         )
+        
+    model=convert_meta_model_to_awq(model, config, device)
 
     for name, parameter in model.named_parameters():
         parameter.requires_grad = False
@@ -123,32 +126,32 @@ if __name__=="__main__":
     destruct_module_optimized(model)
     memory_cleanup()
     
-    # target_modules=[
-    #     "model.embed_tokens.weight"
-    # ]
+    target_modules=[
+        "model.embed_tokens.weight"
+    ]
 
-    # model=load_weights(model, model_name, weight_map, target_modules, device)
-    # # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
+    model=load_weights(model, model_name, weight_map, target_modules, device)
+    # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
     
-    # for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
-    #     batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
-    #     inputs = tokenizer(
-    #         batch,
-    #         max_length=generation_config.max_length,
-    #         padding="max_length",
-    #         truncation=True,
-    #         return_tensors="pt",
-    #     ).to(device)
+    for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
+        batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
+        inputs = tokenizer(
+            batch,
+            max_length=generation_config.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        ).to(device)
 
-    #     hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
+        hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
 
-    #     os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
-    #     save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
+        os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
+        save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
 
     destruct_module_optimized(model)
     memory_cleanup()
     
-    for layer_idx in range(3, len(model.model.layers)):
+    for layer_idx in range(len(model.model.layers)):
         model.train()
         # model.model.layers[layer_idx].to_empty(device=device)
         
@@ -211,7 +214,7 @@ if __name__=="__main__":
                 pickle.dump((top_k_output, top_k_weight), f)
                 
         else:
-            for batch_idx in tqdm(range(generation_config.n_batch), desc=f"Processing MLP Layer {layer_idx}"):
+            for batch_idx in tqdm(range(start, end), desc=f"Processing MLP Layer {layer_idx}"):
                 
                 hidden_states=load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx-1}", f"batch_{batch_idx}")).to(device, dtype=dtype)
                 

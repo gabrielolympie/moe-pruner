@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from mergekit.merge_methods.multislerp import multislerp
+from tqdm.auto import tqdm
+from utils.torch_utils import memory_cleanup
 from copy import deepcopy
 
 from utils.ademamix import AdEMAMix
@@ -48,7 +50,7 @@ class FusedLinear(nn.Module):
             output=output + self.scaling_factor[None] * x
         return output
     
-    def fuse(self, layers, merge_method='sce'):
+    def fuse(self, layers, merge_method='sce', device="cuda:0"):
         for param in self.parameters():
             param.requires_grad = False
             
@@ -73,7 +75,7 @@ class FusedLinear(nn.Module):
                 weight_diff = weight - fused_weight
                 
                 # Use torch.svd_lowrank for efficiency
-                U, S, V = torch.svd_lowrank(weight_diff.to(torch.float32), q=self.rank, niter=2)
+                U, S, V = torch.svd_lowrank(weight_diff.to(dtype=torch.float32, device=device), q=self.rank, niter=2)
                 scaling_factor = torch.sum(S) / self.rank
                 sqrt_S = torch.sqrt(S / scaling_factor)
                 
@@ -103,12 +105,12 @@ class FusedMLP(torch.nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
         self.adapter_type=adapter_type
 
-    def fuse(self, experts, merge_method='sce'):
+    def fuse(self, experts, merge_method='sce', device='cuda:0'):
         assert len(experts) == self.n_fused, "Warning, passed number of experts doesn't match the number of initialized fused experts"
         
-        self.gate_proj.fuse([exp.gate_proj for exp in experts],merge_method=merge_method)
-        self.up_proj.fuse([exp.up_proj for exp in experts],merge_method=merge_method)
-        self.down_proj.fuse([exp.down_proj for exp in experts],merge_method=merge_method)
+        self.gate_proj.fuse([exp.gate_proj for exp in experts],merge_method=merge_method, device=device)
+        self.up_proj.fuse([exp.up_proj for exp in experts],merge_method=merge_method, device=device)
+        self.down_proj.fuse([exp.down_proj for exp in experts],merge_method=merge_method, device=device)
         
         self.mask_up_proj = torch.nn.Linear(self.n_fused, self.hidden_size, bias=False)
         
@@ -142,7 +144,7 @@ class FusedMOE(torch.nn.Module):
         del self.experts
         self.ready = True
 
-    def fuse(self, affinity_matrix, group_size, train_batches, learning_rate, device, merge_method='sce', adapter_type='mixture', rank=8):
+    def fuse(self, affinity_matrix, group_size, train_batches, learning_rate, device, merge_method='sce', adapter_type='mixture', rank=8, low_vram=True):
         inv_mapping_dict = group_items_by_affinity(affinity_matrix, group_size)
 
         # Convert the dictionary to a tensor for saving in state_dict
@@ -150,11 +152,13 @@ class FusedMOE(torch.nn.Module):
         self.register_buffer('inv_mapping_dict', inv_mapping_tensor, persistent=True)
 
         fused_experts = []
-        for k, v in enumerate(inv_mapping_dict):
+        for k, v in tqdm(enumerate(inv_mapping_dict)):
             fused_moe = FusedMLP(self.config, n_fused=group_size, rank=rank, adapter_type=adapter_type).to("cuda")
-            fused_moe.fuse([dequantize_GEMM(self.experts[i], destruct=False, return_params=False) for i in v], merge_method=merge_method)
+            fusion_device="cpu" if low_vram else device # significantly slower on cpu, but can save some vram
+            fused_moe.fuse([dequantize_GEMM(self.experts[i], destruct=False, return_params=False).to(fusion_device) for i in v], merge_method=merge_method, device=device) 
             fused_moe = fused_moe.to(device, dtype=torch.bfloat16)
             fused_experts.append(fused_moe)
+            memory_cleanup()
             
         self.fused_experts = torch.nn.ModuleList(fused_experts).to(device, dtype=torch.bfloat16)
 
@@ -217,7 +221,12 @@ class FusedMOE(torch.nn.Module):
         identity = hidden_states
         orig_shape = hidden_states.shape
         
-        topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
+        gate_outputs=self.gate(hidden_states)
+        if len(gate_outputs)==3:
+            topk_idx, topk_weight, aux_loss = gate_outputs
+        else:
+            aux_loss=0.0
+            topk_idx, topk_weight = gate_outputs
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         return identity, orig_shape, hidden_states, topk_idx, topk_weight, aux_loss

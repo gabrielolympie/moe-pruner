@@ -1,5 +1,6 @@
 from torch.optim.lr_scheduler import _LRScheduler
 from utils.fp8_linear import act_quant, weight_dequant
+from awq.modules.linear import WQLinear_GEMM
 from safetensors import safe_open
 from datasets import load_dataset
 from tqdm.auto import tqdm
@@ -96,6 +97,32 @@ def load_weight(
             else:
                 tensor = torch.nn.Parameter(tensor_slice[:].to(device), requires_grad=False).to(device)
             return tensor
+        
+def convert_meta_model_to_awq(model, config, device):
+    w_bit=config.quantization_config['bits']
+    group_size=config.quantization_config['group_size']
+    modules_to_not_convert= config.quantization_config['modules_to_not_convert']
+    for name, module in tqdm(model.named_modules()):
+        if isinstance(module, torch.nn.Linear):
+            cond = True
+            for elt in modules_to_not_convert:
+                if elt in name:
+                    cond=False
+
+            if cond:
+                rsetattr(
+                    model,
+                    name,
+                    WQLinear_GEMM(
+                        w_bit,
+                        group_size,
+                        module.in_features,
+                        module.out_features,
+                        module.bias,
+                        device
+                    ).to_empty(device="meta")
+                )
+    return model
         
 def get_nonreasoning_dataset(tokenizer, generation_config):
     calibration = load_dataset("cognitivecomputations/dolphin-r1", "nonreasoning", cache_dir="../dolphin-r1")["train"]

@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -28,7 +28,7 @@ from utils.experts_merge_utils import (
     build_affinity_matrix,
     expert_clustering,
     cooccurrence_matrix,
-    group_items_by_affinity
+    group_items_by_affinity,
 )
 
 from utils.torch_utils import (
@@ -37,7 +37,8 @@ from utils.torch_utils import (
     destruct_module_optimized,
     memory_cleanup,
     load_weights,
-    WarmupCosineAnnealingLR
+    WarmupCosineAnnealingLR,
+    convert_meta_model_to_awq
 )
 
 from utils.fused import FusedMOE
@@ -46,8 +47,13 @@ import pickle
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 2 --dora_rank 8
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 4 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:0 --model_name deepseek_v3_awq --start_layer 3 --end_layer 31 --n_epochs 1 --target_routed_expert 8 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 31 --end_layer 61 --n_epochs 1 --target_routed_expert 8 --dora_rank 8
+
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 3 --end_layer 61 --n_epochs 2 --target_routed_expert 6 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 3 --end_layer 61 --n_epochs 2 --target_routed_expert 16 --dora_rank 8
+
+
 # python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 8 --dora_rank 8
 # python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 16 --dora_rank 8
 
@@ -105,18 +111,35 @@ if __name__=="__main__":
     
     print(distillation_config.calibrate_merge)
     
+    config=AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True
+    )
+    
     with open(f"{model_name}/model.safetensors.index.json", "r") as f:
         weight_map = json.load(f)["weight_map"]
 
     with init_empty_weights():
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+        # model = AutoModelForCausalLM.from_pretrained(
+        #     model_name,
+        #     trust_remote_code=True,
+        #     torch_dtype=torch.bfloat16,
+        #     attn_implementation="flash_attention_2",
+        #     low_cpu_mem_usage=True
+        # )
+        model = AutoModelForCausalLM.from_config(
+            config,
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            low_cpu_mem_usage=True
+            # torch_dtype=dtype,
+            # attn_implementation="flash_attention_2",
+            # low_cpu_mem_usage=True
         )
 
+    model=convert_meta_model_to_awq(model, config, device)
+    
     for name, parameter in model.named_parameters():
         parameter.requires_grad = False
 
@@ -127,14 +150,17 @@ if __name__=="__main__":
     # layer_idx=23
     for layer_idx in range(start_layer, end_layer):
         
-        model.model.layers[layer_idx].to_empty(device=device)
+        # model.model.layers[layer_idx].to_empty(device=device)
         target_modules=[f".layers.{layer_idx}."]
         model=load_weights(model, model_name, weight_map, target_modules, device)
-
+        
         distilled_mlp=deepcopy(model.model.layers[layer_idx].mlp).to(device)
         layer_norm=deepcopy(model.model.layers[layer_idx].post_attention_layernorm).to(device, dtype=torch.bfloat16)
 
         distilled_mlp.gate = distilled_mlp.gate.to(torch.bfloat16)
+        
+        destruct_module_optimized(model)
+        memory_cleanup()
         
         for param in distilled_mlp.parameters():
             param.requires_grad=False
@@ -146,7 +172,7 @@ if __name__=="__main__":
         affinity_matrix = cooccurrence_matrix(top_k_output, len(np.unique(top_k_output)))
         affinity_matrix=(affinity_matrix - affinity_matrix.min())/(affinity_matrix.max()-affinity_matrix.min())
 
-        train_batches=2048
+        train_batches=len(os.listdir(os.path.join(path_config.expert_states, f"layer_{layer_idx}")))
 
         group_size=affinity_matrix.shape[0] // distillation_config.target_routed_expert
         
@@ -156,9 +182,9 @@ if __name__=="__main__":
 
 
         fused_moe = FusedMOE(distilled_mlp)
-        fused_moe.fuse(affinity_matrix, group_size, train_batches, learning_rate=distillation_config.learning_rate, device=device, merge_method=merge_method, rank=distillation_config.dora_rank, adapter_type="mixture")
+        fused_moe.fuse(affinity_matrix, group_size, train_batches, learning_rate=distillation_config.learning_rate, device=device, merge_method=merge_method, rank=distillation_config.dora_rank, adapter_type="mixture", low_vram=False)
         fused_moe.train_mode(distillation_config.learning_rate, train_batches * distillation_config.n_epochs)
-        fused_moe = torch.compile(fused_moe)
+        # fused_moe = torch.compile(fused_moe)
 
         writer = SummaryWriter(log_dir=f'multiplex_runs/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}_mixture/layer{layer_idx}')
 
@@ -167,28 +193,28 @@ if __name__=="__main__":
             progress_bar = tqdm(range(train_batches - eval_batches), desc=f"Calibrating fused_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}_mixture_layer{layer_idx}")
             for batch_idx in progress_bar:
                 hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                output = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+                output = None #load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
                 loss = fused_moe.train_step(hidden_states, layer_norm, temperature=1, output=output, gradient_accumulation_step=distillation_config.gradient_accumulation_steps)
                 progress_bar.set_postfix(loss=loss.item())
                 writer.add_scalar(f'Loss/train', loss.item(), batch_idx + epoch * (train_batches - eval_batches))
 
             # Evaluation phase
-            eval_progress_bar = tqdm(range(train_batches - eval_batches, train_batches), desc=f"Evaluating fused_{distillation_config.learning_rate}_{merge_method}_{distillation_config.dora_rank}_mixture")
-            total_eval_loss = 0
-            for batch_idx in eval_progress_bar:
-                hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                output = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+            # eval_progress_bar = tqdm(range(train_batches - eval_batches, train_batches), desc=f"Evaluating fused_{distillation_config.learning_rate}_{merge_method}_{distillation_config.dora_rank}_mixture")
+            # total_eval_loss = 0
+            # for batch_idx in eval_progress_bar:
+            #     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+            #     output = None #load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
 
-                residual = deepcopy(hidden_states)
-                hidden_states = layer_norm(hidden_states)
-                pred = fused_moe.forward(hidden_states) + residual
+            #     residual = deepcopy(hidden_states)
+            #     hidden_states = layer_norm(hidden_states)
+            #     pred = fused_moe.forward(hidden_states) + residual
 
-                local_loss = torch.nn.functional.smooth_l1_loss(pred, output, reduction='mean')
-                total_eval_loss += local_loss.item()
-                eval_progress_bar.set_postfix(loss=local_loss.item())
+            #     local_loss = torch.nn.functional.smooth_l1_loss(pred, output, reduction='mean')
+            #     total_eval_loss += local_loss.item()
+            #     eval_progress_bar.set_postfix(loss=local_loss.item())
 
-            avg_eval_loss = total_eval_loss / eval_batches
-            writer.add_scalar(f'Loss/eval', avg_eval_loss, epoch)
+            # avg_eval_loss = total_eval_loss / eval_batches
+            # writer.add_scalar(f'Loss/eval', avg_eval_loss, epoch)
 
         # Close the writer
         writer.close()
