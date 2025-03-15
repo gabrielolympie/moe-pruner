@@ -27,8 +27,8 @@ from utils.torch_utils import (
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 1400 --local_batch_size 700 --local_batch 0 --batch_size 4 --max_length 512
-## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 1400 --local_batch_size 700 --local_batch 1 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 600 --local_batch_size 300 --local_batch 0 --batch_size 4 --max_length 512
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 600 --local_batch_size 300 --local_batch 1 --batch_size 4 --max_length 512
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Synthetic Data Generation Script")
@@ -152,7 +152,7 @@ if __name__=="__main__":
     memory_cleanup()
     
     for layer_idx in range(len(model.model.layers)):
-        model.train()
+        model.eval()
         # model.model.layers[layer_idx].to_empty(device=device)
         
         target_modules=[f".layers.{layer_idx}."]

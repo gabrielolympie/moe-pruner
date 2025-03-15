@@ -9,8 +9,123 @@ from utils.torch_utils import memory_cleanup
 from copy import deepcopy
 
 from utils.ademamix import AdEMAMix
+# from bitsandbytes.optim.ademamix import AdEMAMix8bit as AdEMAMix
 from utils.patched_sce import sce_merge
 from utils.experts_merge_utils import group_items_by_affinity, dequantize_GEMM
+
+# class FusedLinear(nn.Module):
+#     def __init__(self, in_features, out_features, rank=8, alpha=1, n_fused=4, adapter_type="mixture", bias=False, **kwargs):
+#         super().__init__()
+        
+#         self.rank = rank
+#         self.adapter_type = adapter_type
+#         self.fused_layer = nn.Linear(in_features, out_features, bias=bias)
+        
+#         if self.adapter_type == 'lora':
+#             # Replace nn.Parameters with linear layers where appropriate
+#             self.qa_layer = nn.Linear(in_features, rank, bias=False)
+#             self.qb_layer = nn.Linear(rank, out_features, bias=False)
+            
+#             # Initialize the weights with small random values
+#             self.qa_layer.weight.data.normal_(mean=0.0, std=0.02)
+#             self.qb_layer.weight.data.normal_(mean=0.0, std=0.02)
+            
+#             # Keep mask_up_proj as Parameter since it's specific to this implementation
+#             self.mask_up_proj = nn.Parameter(torch.randn(n_fused, rank) * 0.02)
+#             self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
+            
+#         if self.adapter_type == 'mixture':
+#             self.n_fused = n_fused
+            
+#             # Create separate qa and qb layers for each mixture component
+#             self.qa_layers = nn.ModuleList([
+#                 nn.Linear(in_features, rank, bias=False) for _ in range(n_fused)
+#             ])
+            
+#             self.qb_layers = nn.ModuleList([
+#                 nn.Linear(rank, out_features, bias=False) for _ in range(n_fused)
+#             ])
+            
+#             # Initialize with zeros (as in original)
+#             for layer in self.qa_layers:
+#                 layer.weight.data.zero_()
+            
+#             for layer in self.qb_layers:
+#                 layer.weight.data.zero_()
+                
+#             self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
+    
+#     def forward(self, x, top_k_weights):
+#         output = self.fused_layer(x)
+        
+#         if self.adapter_type == 'lora':
+#             # Use linear layers for forward pass
+#             mid_features = self.qa_layer(x)  # [b, r]
+            
+#             # Still need einsum for the mask operation
+#             mid_features = torch.einsum('br,brr->br', mid_features, 
+#                                        torch.diag_embed(torch.einsum('bk,kr -> br', 
+#                                                                     top_k_weights, self.mask_up_proj)))
+            
+#             adapter_output = self.qb_layer(mid_features)
+#             output = output + self.scaling_factor[None] * adapter_output
+            
+#         if self.adapter_type == 'mixture':
+#             batch_size = x.shape[0]
+#             adapter_outputs = []
+            
+#             for i in range(self.n_fused):
+#                 # Process through each adapter pair
+#                 mid_features = self.qa_layers[i](x)  # [b, r]
+#                 adapter_out = self.qb_layers[i](mid_features)  # [b, h]
+                
+#                 # Apply top-k weights
+#                 weighted_out = adapter_out * top_k_weights[:, i].unsqueeze(-1)  # [b, h]
+#                 adapter_outputs.append(weighted_out)
+            
+#             # Sum all adapter outputs
+#             combined_adapter_output = torch.stack(adapter_outputs, dim=1).sum(dim=1)
+#             output = output + self.scaling_factor[None] * combined_adapter_output
+            
+#         return output
+    
+#     def fuse(self, layers, merge_method='sce', device="cuda:0"):
+#         for param in self.parameters():
+#             param.requires_grad = False
+            
+#         weights = [layer.weight for layer in layers]
+#         if merge_method == 'sce':
+#             fused_weight = sce_merge(weights, weights[0], select_topk=1/len(weights))
+#         elif merge_method == 'slerp':
+#             fused_weight = multislerp(weights, [1/len(weights)]*len(weights), weights[0])
+#         elif merge_method == 'mean':
+#             fused_weight = torch.mean(torch.stack(weights), dim=0) 
+#         elif merge_method == 'greedy':
+#             fused_weight = weights[0].clone()
+#         else:
+#             raise ValueError(f"Unknown merge method: {merge_method}")
+            
+#         self.fused_layer.weight = nn.Parameter(fused_weight)
+        
+#         if self.adapter_type == 'mixture':
+#             for i, weight in enumerate(weights):
+#                 weight_diff = weight - fused_weight
+                
+#                 # Use torch.svd_lowrank for efficiency
+#                 U, S, V = torch.svd_lowrank(weight_diff.to(dtype=torch.float32, device=device), q=self.rank, niter=2)
+#                 scaling_factor = torch.sum(S) / self.rank
+#                 sqrt_S = torch.sqrt(S / scaling_factor)
+                
+#                 # Set weights for decomposition components using the linear layers
+#                 qa_weight = (torch.diag(sqrt_S) @ V.T).to(device=fused_weight.device, dtype=fused_weight.dtype)
+#                 qb_weight = (U @ torch.diag(sqrt_S)).to(device=fused_weight.device, dtype=fused_weight.dtype)
+                
+#                 # Update the weights of the linear layers
+#                 self.qa_layers[i].weight.data.copy_(qa_weight)
+#                 self.qb_layers[i].weight.data.copy_(qb_weight)
+            
+#         for params in self.parameters():
+#             params.requires_grad = True
 
 class FusedLinear(nn.Module):
     def __init__(self, in_features, out_features, rank=8, alpha=1, n_fused=4, adapter_type="mixture", bias=False, **kwargs):
@@ -19,35 +134,61 @@ class FusedLinear(nn.Module):
         self.rank = rank
         self.adapter_type = adapter_type
         self.fused_layer = nn.Linear(in_features, out_features, bias=bias)
+        self.first_forward = True
         
         if self.adapter_type == 'lora':
             self.qa_weights = nn.Parameter(torch.randn(rank, in_features) * 0.02)
             self.qb_weights = nn.Parameter(torch.randn(out_features, rank) * 0.02)
             self.mask_up_proj = nn.Parameter(torch.randn(n_fused, rank) * 0.02)
-            self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
+            # Initialize with placeholder values, will be updated on first forward pass
+            self.scaling_factor = nn.Parameter(torch.ones(out_features))
             
         if self.adapter_type == 'mixture':
             self.n_fused = n_fused
             # For efficient forward pass, create weight tensors
             self.qa_weights = nn.Parameter(torch.stack([torch.zeros(rank, in_features) for i in range(n_fused)]))
             self.qb_weights = nn.Parameter(torch.stack([torch.zeros(out_features, rank) for i in range(n_fused)]))
-            self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
+            # Initialize with placeholder values, will be updated on first forward pass
+            self.scaling_factor = nn.Parameter(torch.ones(out_features))
     
     def forward(self, x, top_k_weights):
         output = self.fused_layer(x)
         
         if self.adapter_type == 'lora': 
-            x = torch.einsum('bh,rh->br', x, self.qa_weights)
-            x = torch.einsum('br,brr->br', x, torch.diag_embed(torch.einsum('bk,kr -> br', top_k_weights, self.mask_up_proj)))
-            x = torch.einsum('br,hr ->bh', x, self.qb_weights)
-            output = output + self.scaling_factor[None] * x
+            x_intermediate = torch.einsum('bh,rh->br', x, self.qa_weights)
+            x_intermediate = torch.einsum('br,brr->br', x_intermediate, torch.diag_embed(torch.einsum('bk,kr -> br', top_k_weights, self.mask_up_proj)))
+            adapter_output = torch.einsum('br,hr->bh', x_intermediate, self.qb_weights)
+            
+            # Initialize scaling factor based on L1 norm on first forward pass
+            if self.first_forward:
+                with torch.no_grad():
+                    l1_norm = torch.mean(torch.abs(output), dim=0)
+                    adapter_l1_norm = torch.mean(torch.abs(adapter_output), dim=0)
+                    # Set scaling to maintain reasonable proportion (e.g., 10% of main output)
+                    scaling = 1.0 * l1_norm / (adapter_l1_norm + 1e-8)
+                    self.scaling_factor.data = scaling
+                    self.first_forward = False
+            
+            output = output + self.scaling_factor[None] * adapter_output
             
         if self.adapter_type == 'mixture':
-            x = torch.einsum('bh,krh->bkr', x, self.qa_weights)
-            x = torch.einsum('bkr,khr->bkh', x, self.qb_weights)
-            x = torch.einsum('bkh,bk->bkh', x, top_k_weights)
-            x = torch.sum(x, dim=1)
-            output=output + self.scaling_factor[None] * x
+            x_intermediate = torch.einsum('bh,krh->bkr', x, self.qa_weights)
+            x_intermediate = torch.einsum('bkr,khr->bkh', x_intermediate, self.qb_weights)
+            adapter_output = torch.einsum('bkh,bk->bkh', x_intermediate, top_k_weights)
+            adapter_output = torch.sum(adapter_output, dim=1)
+            
+            # Initialize scaling factor based on L1 norm on first forward pass
+            if self.first_forward:
+                with torch.no_grad():
+                    l1_norm = torch.mean(torch.abs(output), dim=0)
+                    adapter_l1_norm = torch.mean(torch.abs(adapter_output), dim=0)
+                    # Set scaling to maintain reasonable proportion (e.g., 10% of main output)
+                    scaling = 1.0 * l1_norm / (adapter_l1_norm + 1e-8)
+                    self.scaling_factor.data = scaling
+                    self.first_forward = False
+            
+            output = output + self.scaling_factor[None] * adapter_output
+            
         return output
     
     def fuse(self, layers, merge_method='sce', device="cuda:0"):
@@ -56,7 +197,7 @@ class FusedLinear(nn.Module):
             
         weights = [layer.weight for layer in layers]
         if merge_method == 'sce':
-            fused_weight = sce_merge(weights, weights[0], select_topk=1/len(weights))
+            fused_weight = sce_merge(weights, weights[0], select_topk=len(weights)//2)
         elif merge_method == 'slerp':
             fused_weight = multislerp(weights, [1/len(weights)]*len(weights), weights[0])
         elif merge_method == 'mean':
@@ -87,6 +228,9 @@ class FusedLinear(nn.Module):
             self.qa_weights = nn.Parameter(torch.stack(qa_weights)).to(device=fused_weight.device, dtype=fused_weight.dtype)
             self.qb_weights = nn.Parameter(torch.stack(qb_weights)).to(device=fused_weight.device, dtype=fused_weight.dtype)
             
+        # Reset first_forward flag to initialize scaling factor on next forward pass
+        self.first_forward = True
+        
         for params in self.parameters():
             params.requires_grad = True
 
@@ -113,6 +257,7 @@ class FusedMLP(torch.nn.Module):
         self.down_proj.fuse([exp.down_proj for exp in experts],merge_method=merge_method, device=device)
         
         self.mask_up_proj = torch.nn.Linear(self.n_fused, self.hidden_size, bias=False)
+        self.mask_up_proj.weight.data.normal_(mean=0.0, std=0.02)
         
     def forward(self, x, top_k_weights):
         x = x + self.mask_up_proj(top_k_weights)
@@ -155,6 +300,7 @@ class FusedMOE(torch.nn.Module):
         for k, v in tqdm(enumerate(inv_mapping_dict)):
             fused_moe = FusedMLP(self.config, n_fused=group_size, rank=rank, adapter_type=adapter_type).to("cuda")
             fusion_device="cpu" if low_vram else device # significantly slower on cpu, but can save some vram
+            
             fused_moe.fuse([dequantize_GEMM(self.experts[i], destruct=False, return_params=False).to(fusion_device) for i in v], merge_method=merge_method, device=device) 
             fused_moe = fused_moe.to(device, dtype=torch.bfloat16)
             fused_experts.append(fused_moe)
@@ -165,10 +311,11 @@ class FusedMOE(torch.nn.Module):
     def train_mode(self, learning_rate, train_batches):
         self.train()
         self.optimizer = AdEMAMix(
-            self.fused_experts.parameters(),
+            [p for p in self.fused_experts.parameters() if p.requires_grad],
             lr=learning_rate,
-            betas=(0.9, 0.999, 0.9999),
-            alpha=5
+            betas=(0.7, 0.999, 0.9999),
+            alpha=5,
+            weight_decay=1e-3
         )
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
@@ -192,10 +339,10 @@ class FusedMOE(torch.nn.Module):
         
         T = temperature
         loss = self.criterion(T * pred, T * true, reduction='mean')
-        
         loss.backward()
         self.step += 1
         if self.step == gradient_accumulation_step:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
             self.step=0

@@ -47,15 +47,9 @@ import pickle
 
 torch.set_float32_matmul_precision('medium')
 
-# python 3_layer_distillation_fused.py --device cuda:0 --model_name deepseek_v3_awq --start_layer 3 --end_layer 31 --n_epochs 1 --target_routed_expert 8 --dora_rank 8
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 31 --end_layer 61 --n_epochs 1 --target_routed_expert 8 --dora_rank 8
+# python 3_layer_distillation_fused.py --device cuda:0 --model_name deepseek_v3_awq --start_layer 3 --end_layer 31 --n_epochs 4 --target_routed_expert 4 --dora_rank 4
+# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 31 --end_layer 61 --n_epochs 4 --target_routed_expert 4 --dora_rank 4
 
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 3 --end_layer 61 --n_epochs 2 --target_routed_expert 6 --dora_rank 8
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_v3_awq --start_layer 3 --end_layer 61 --n_epochs 2 --target_routed_expert 16 --dora_rank 8
-
-
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 8 --dora_rank 8
-# python 3_layer_distillation_fused.py --device cuda:1 --model_name deepseek_coder_v2_lite_instruct_awq --start_layer 1 --end_layer 27 --n_epochs 2 --target_routed_expert 16 --dora_rank 8
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Two-layer distillation script.")
@@ -101,7 +95,7 @@ if __name__=="__main__":
         target_active_expert = target_active_expert,
         eval_batches=16,
         gradient_accumulation_steps= 1,
-        learning_rate= 2e-4,
+        learning_rate= 5e-4,
         end_factor= 0.3,
         calibrate_merge=calibrate_merge,
         skip_first_tokens=0, ## useful to avoid tuning on early tokens that have less informations
@@ -150,7 +144,6 @@ if __name__=="__main__":
     # layer_idx=23
     for layer_idx in range(start_layer, end_layer):
         
-        # model.model.layers[layer_idx].to_empty(device=device)
         target_modules=[f".layers.{layer_idx}."]
         model=load_weights(model, model_name, weight_map, target_modules, device)
         
@@ -169,6 +162,7 @@ if __name__=="__main__":
             (top_k_output, top_k_weight) = pickle.load(f)
 
         top_k_output=top_k_output.detach().to(torch.int64).cpu().numpy()
+        top_k_output[top_k_output > model.config.n_routed_experts] = 0 ## on one occasion i had an overflow to max of int64, so this is to prevent this, or it kills the kernel
         affinity_matrix = cooccurrence_matrix(top_k_output, len(np.unique(top_k_output)))
         affinity_matrix=(affinity_matrix - affinity_matrix.min())/(affinity_matrix.max()-affinity_matrix.min())
 
@@ -182,8 +176,20 @@ if __name__=="__main__":
 
 
         fused_moe = FusedMOE(distilled_mlp)
-        fused_moe.fuse(affinity_matrix, group_size, train_batches, learning_rate=distillation_config.learning_rate, device=device, merge_method=merge_method, rank=distillation_config.dora_rank, adapter_type="mixture", low_vram=False)
+        fused_moe.fuse(affinity_matrix, group_size, train_batches, learning_rate=distillation_config.learning_rate, device=device, merge_method=merge_method, rank=distillation_config.dora_rank, adapter_type="mixture", low_vram=True)
         fused_moe.train_mode(distillation_config.learning_rate, train_batches * distillation_config.n_epochs)
+        fused_moe.set_ready()
+        
+        memory_cleanup()
+
+        for name, params in fused_moe.named_parameters():
+            if 'gate.' in name:
+                params.requires_grad = True
+            if 'fused' in name:
+                params.requires_grad = True
+            if 'fused_layer' in name:
+                params.requires_grad = True
+        
         # fused_moe = torch.compile(fused_moe)
 
         writer = SummaryWriter(log_dir=f'multiplex_runs/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}_mixture/layer{layer_idx}')
@@ -192,29 +198,35 @@ if __name__=="__main__":
             # Training phase
             progress_bar = tqdm(range(train_batches - eval_batches), desc=f"Calibrating fused_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}_mixture_layer{layer_idx}")
             for batch_idx in progress_bar:
-                hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                output = None #load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-                loss = fused_moe.train_step(hidden_states, layer_norm, temperature=1, output=output, gradient_accumulation_step=distillation_config.gradient_accumulation_steps)
-                progress_bar.set_postfix(loss=loss.item())
-                writer.add_scalar(f'Loss/train', loss.item(), batch_idx + epoch * (train_batches - eval_batches))
+                hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:400]
+                output = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:400]
+
+                if not(output.max().isnan()): ## sometime there is numerical instability
+                    loss = fused_moe.train_step(hidden_states, layer_norm, temperature=1, output=output, gradient_accumulation_step=distillation_config.gradient_accumulation_step)
+                    progress_bar.set_postfix(loss=loss.item())
+            writer.add_scalar(f'Loss/train', loss.item(), batch_idx + epoch * (train_batches - eval_batches))
 
             # Evaluation phase
-            # eval_progress_bar = tqdm(range(train_batches - eval_batches, train_batches), desc=f"Evaluating fused_{distillation_config.learning_rate}_{merge_method}_{distillation_config.dora_rank}_mixture")
-            # total_eval_loss = 0
-            # for batch_idx in eval_progress_bar:
-            #     hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
-            #     output = None #load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:]
+            eval_progress_bar = tqdm(range(train_batches - eval_batches, train_batches), desc=f"Evaluating fused_{lr}_{merge_method}_{rank}_{adapter_type}")
+            total_eval_loss = 0
+            fused_moe.eval()
+            for batch_idx in eval_progress_bar:
+                hidden_states = load_quant(os.path.join(path_config.expert_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:256] ## limiting length to avoid oom
+                output = load_quant(os.path.join(path_config.intermediate_states, f"layer_{layer_idx}", f"batch_{batch_idx}")).to(device, dtype=torch.bfloat16)[:, distillation_config.skip_first_tokens:256]
 
-            #     residual = deepcopy(hidden_states)
-            #     hidden_states = layer_norm(hidden_states)
-            #     pred = fused_moe.forward(hidden_states) + residual
+                residual = deepcopy(hidden_states)
+                hidden_states = layer_norm(hidden_states)
 
-            #     local_loss = torch.nn.functional.smooth_l1_loss(pred, output, reduction='mean')
-            #     total_eval_loss += local_loss.item()
-            #     eval_progress_bar.set_postfix(loss=local_loss.item())
+                if not(output.max().isnan()): ## sometime there is numerical instability
+                    pred = fused_moe.forward(hidden_states) + residual
 
-            # avg_eval_loss = total_eval_loss / eval_batches
-            # writer.add_scalar(f'Loss/eval', avg_eval_loss, epoch)
+                local_loss = torch.nn.functional.smooth_l1_loss(pred, output, reduction='mean')
+                total_eval_loss += local_loss.item()
+                eval_progress_bar.set_postfix(loss=local_loss.item())
+
+            avg_eval_loss = total_eval_loss / eval_batches
+            writer.add_scalar(f'Loss/eval', avg_eval_loss, epoch)
+            memory_cleanup()
 
         # Close the writer
         writer.close()
@@ -225,6 +237,9 @@ if __name__=="__main__":
         os.makedirs(path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}", exist_ok=True)
         export_path=path_config.moe_states+f"/distillat_{distillation_config.pruning_method}_{distillation_config.target_routed_expert}/layer_{layer_idx}"
         torch.save(fused_moe.state_dict(), export_path)
+        
+        destruct_module_optimized(fused_moe)
+        memory_cleanup()
 
                 
         
