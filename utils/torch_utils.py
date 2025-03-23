@@ -101,13 +101,17 @@ def load_weight(
 def convert_meta_model_to_awq(model, config, device):
     w_bit=config.quantization_config['bits']
     group_size=config.quantization_config['group_size']
-    modules_to_not_convert= config.quantization_config['modules_to_not_convert']
+    modules_to_not_convert=['lm_head']
+    if config.quantization_config['modules_to_not_convert'] is not None:
+        modules_to_not_convert+=config.quantization_config['modules_to_not_convert']
     for name, module in tqdm(model.named_modules()):
         if isinstance(module, torch.nn.Linear):
+            
             cond = True
-            for elt in modules_to_not_convert:
-                if elt in name:
-                    cond=False
+            if modules_to_not_convert is not None:
+                for elt in modules_to_not_convert:
+                    if elt in name:
+                        cond=False
 
             if cond:
                 rsetattr(

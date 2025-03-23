@@ -27,8 +27,16 @@ from utils.torch_utils import (
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 600 --local_batch_size 300 --local_batch 0 --batch_size 4 --max_length 512
-## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 600 --local_batch_size 300 --local_batch 1 --batch_size 4 --max_length 512
+
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 800 --local_batch_size 200 --local_batch 0 --batch_size 4 --max_length 512 --start_layer 44 --end_layer 45
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v3_awq --n_batch 800 --local_batch_size 200 --local_batch 1 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 61
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 800 --local_batch_size 200 --local_batch 2 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 61
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v3_awq --n_batch 800 --local_batch_size 200 --local_batch 3 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 61
+
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v2_lite_chat_awq --n_batch 4096 --local_batch_size 1024 --local_batch 0 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 27
+## python 2_synthetic_data_generation.py --device cuda:0 --model_name deepseek_v2_lite_chat_awq --n_batch 4096 --local_batch_size 1024 --local_batch 1 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 27
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v2_lite_chat_awq --n_batch 4096 --local_batch_size 1024 --local_batch 2 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 27
+## python 2_synthetic_data_generation.py --device cuda:1 --model_name deepseek_v2_lite_chat_awq --n_batch 4096 --local_batch_size 1024 --local_batch 3 --batch_size 4 --max_length 512 --start_layer 0 --end_layer 27
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Synthetic Data Generation Script")
@@ -41,6 +49,9 @@ if __name__=="__main__":
     parser.add_argument("--local_batch_size", type=int, default=512, help="Device to use")
     parser.add_argument("--local_batch", type=int, default=512, help="Device to use")
     
+    parser.add_argument("--start_layer", type=int, default=1, help="Starting layer.")
+    parser.add_argument("--end_layer", type=int, default=27, help="Ending layer.")
+    
     args = parser.parse_args()
     device=args.device
     n_batch=args.n_batch
@@ -49,6 +60,8 @@ if __name__=="__main__":
     model_name=args.model_name
     local_batch_size=args.local_batch_size
     local_batch=args.local_batch
+    start_layer=args.start_layer
+    end_layer=args.end_layer
     
     
     dtype=torch.float16
@@ -126,32 +139,34 @@ if __name__=="__main__":
     destruct_module_optimized(model)
     memory_cleanup()
     
-    target_modules=[
-        "model.embed_tokens.weight"
-    ]
-
-    model=load_weights(model, model_name, weight_map, target_modules, device)
-    # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
     
-    for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
-        batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
-        inputs = tokenizer(
-            batch,
-            max_length=generation_config.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        ).to(device)
+    if start_layer == 0:
+        target_modules=[
+            "model.embed_tokens.weight"
+        ]
 
-        hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
+        model=load_weights(model, model_name, weight_map, target_modules, device)
+        # model.model.embed_tokens=torch.compile(model.model.embed_tokens)
+        
+        for batch_idx in tqdm(range(start, end), desc="Processing embeddings"):
+            batch = train_dataset[generation_config.batch_size * batch_idx : generation_config.batch_size * (batch_idx + 1)]
+            inputs = tokenizer(
+                batch,
+                max_length=generation_config.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).to(device)
 
-        os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
-        save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
+            hidden_states = model.model.embed_tokens(inputs["input_ids"]).to(dtype=dtype)
 
-    destruct_module_optimized(model)
-    memory_cleanup()
+            os.makedirs(os.path.join(path_config.intermediate_states, f"layer_{-1}"), exist_ok=True)
+            save_quant(hidden_states, os.path.join(path_config.intermediate_states, f"layer_{-1}", f"batch_{batch_idx}"))
+
+        destruct_module_optimized(model)
+        memory_cleanup()
     
-    for layer_idx in range(len(model.model.layers)):
+    for layer_idx in range(start_layer, end_layer):
         model.eval()
         # model.model.layers[layer_idx].to_empty(device=device)
         

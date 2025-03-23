@@ -393,43 +393,82 @@ class DeepseekV2MLP(nn.Module):
         return down_proj
 
 class FusedLinear(nn.Module):
-    def __init__(self, in_features, out_features, rank=8, alpha=1, n_fused=4, adapter_type="mixture", bias=False, **kwargs):
+    def __init__(self, in_features, out_features, rank=8, n_fused=4, bias=False, **kwargs):
         super().__init__()
         
+        self.in_features = in_features
+        self.out_features = out_features
         self.rank = rank
-        self.adapter_type = adapter_type
+        self.n_fused = n_fused
+        
+        # Linear layer
         self.fused_layer = nn.Linear(in_features, out_features, bias=bias)
         
-        if self.adapter_type == 'lora':
-            self.qa_weights = nn.Parameter(torch.randn(rank, in_features) * 0.02)
-            self.qb_weights = nn.Parameter(torch.randn(out_features, rank) * 0.02)
-            self.mask_up_proj = nn.Parameter(torch.randn(n_fused, rank) * 0.02)
-            self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
-            
-        if self.adapter_type == 'mixture':
-            self.n_fused = n_fused
-            # For efficient forward pass, create weight tensors
-            self.qa_weights = nn.Parameter(torch.stack([torch.zeros(rank, in_features) for i in range(n_fused)]))
-            self.qb_weights = nn.Parameter(torch.stack([torch.zeros(out_features, rank) for i in range(n_fused)]))
-            self.scaling_factor = nn.Parameter(torch.Tensor([0.1] * out_features))
+        # Adapter weights
+        self.qa_weights = nn.Parameter(torch.randn(n_fused, rank, in_features) * 0.02)
+        self.qb_weights = nn.Parameter(torch.randn(n_fused, out_features, rank) * 0.02)
+        
+        # Scaling factor
+        self.scaling_factor = nn.Parameter(torch.ones(n_fused, out_features))
+        
+        # Flag to check if scaling factor has been computed
+        self.scaling_factor_computed = [False] * n_fused
     
     def forward(self, x, top_k_weights):
+        # Linear transformation
         output = self.fused_layer(x)
         
-        if self.adapter_type == 'lora': 
-            x = torch.einsum('bh,rh->br', x, self.qa_weights)
-            x = torch.einsum('br,brr->br', x, torch.diag_embed(torch.einsum('bk,kr -> br', top_k_weights, self.mask_up_proj)))
-            x = torch.einsum('br,hr ->bh', x, self.qb_weights)
-            output = output + self.scaling_factor[None] * x
+        # Adapter mechanism
+        if torch.all(torch.abs(top_k_weights) < 1e-6):
+            return output
+        
+        adapter_output = torch.zeros_like(output)
+        batch_size = x.shape[0]
+        
+        # Process each adapter separately
+        if len(x.shape) == 2:
+            for i in range(self.n_fused):
+                # Find batch items where this adapter is active
+                active_mask = torch.abs(top_k_weights[:, i]) > 1e-6
+                active_count = active_mask.sum().item()
+                
+                if active_count > 0:
+                    
+                    # Only process if there are any active items for this adapter
+                    active_indices = torch.nonzero(active_mask).squeeze(-1)
+                    active_x = x[active_indices]
+                    active_weights = top_k_weights[active_indices, i:i+1]
+                    
+                    # Compute adapter output for active batch items
+                    intermediate = F.linear(active_x, self.qa_weights[i])
+                    active_output = F.linear(intermediate, self.qb_weights[i])
+                    
+                    active_output = active_output * active_weights
+                    
+                    # Add to the corresponding positions in adapter_output
+                    adapter_output[active_indices] = adapter_output[active_indices] + 0.1 * active_output * self.scaling_factor[i][None]
+        
+        return output + adapter_output
             
-        if self.adapter_type == 'mixture':
-            if len(x.shape) == 2:
-                x = torch.einsum('bh,krh->bkr', x, self.qa_weights)
-                x = torch.einsum('bkr,khr->bkh', x, self.qb_weights)
-                x = torch.einsum('bkh,bk->bkh', x, top_k_weights)
-                x = torch.sum(x, dim=1)
-                output=output + self.scaling_factor[None] * x
-        return output
+class FusedMLP(torch.nn.Module):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, n_fused=4, rank=8, adapter_type='lora'):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
+        self.intermediate_size = (
+            config.moe_intermediate_size if intermediate_size is None else intermediate_size
+        )
+        self.n_fused=n_fused
+        self.gate_proj = FusedLinear(self.hidden_size, self.intermediate_size, bias=False, rank=rank, n_fused=n_fused, adapter_type=adapter_type)
+        self.up_proj = FusedLinear(self.hidden_size, self.intermediate_size, bias=False, rank=rank, n_fused=n_fused, adapter_type=adapter_type)
+        self.down_proj = FusedLinear(self.intermediate_size, self.hidden_size, bias=False, rank=rank, n_fused=n_fused, adapter_type=adapter_type)
+        self.act_fn = ACT2FN[config.hidden_act]
+        self.adapter_type=adapter_type
+        
+    def forward(self, x, top_k_weights):
+        x = x + self.mask_up_proj(top_k_weights)
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x, top_k_weights)) * self.up_proj(x, top_k_weights), top_k_weights)
+        return down_proj
 
 class FusedMLP(torch.nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None, n_fused=4, rank=8, adapter_type='mixture'):
