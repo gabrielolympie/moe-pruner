@@ -12,6 +12,10 @@ Our primary objective is to make DeepSeek-v3 usable on consumer-grade hardware. 
 Naming convention is Num Fused experts / Num weights. I did not add the number of active experts because this can change during inference depending on the activated origin experts.
 Uploading both final and unhealed models, for finetuning, i recommend using the unhealed models.
 
+### DeepSeek-v3-0324 Unhealed
+- 8 Fused Experts, rank 4 (~39B parameters): 1/20 size reduction : https://huggingface.co/AlphaGaO/DeepSeek-V3-0324-Fused-8E-39B-Unhealed-Preview
+- 4 Fused Experts, rank 4 (~29B parameters): 1/23 size reduction : https://huggingface.co/AlphaGaO/DeepSeek-V3-0324-Fused-4E-29B-Unhealed-Preview
+
 ### DeepSeek-Coder-v2-lite
 - 2 Fused Experts / 2B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-2E-2B-preview
 - 4 Fused Experts / 2.5B Params : https://huggingface.co/AlphaGaO/Deepseek-Coder-V2-Lite-Instruct-Fused-4E-2_5B-preview
